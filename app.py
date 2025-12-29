@@ -30,6 +30,16 @@ st.markdown("""
     /* Buch-Karte Design */
     .book-title { font-size: 1.4rem; font-weight: 700; margin-bottom: 0px; color: #2c3e50 !important; }
     .book-meta { font-size: 1.0rem; color: #7f8c8d !important; font-style: italic; margin-bottom: 5px; }
+    
+    /* Buchstaben-Header Design */
+    .letter-header {
+        font-size: 2rem;
+        font-weight: bold;
+        color: #d35400 !important;
+        border-bottom: 2px solid #d35400;
+        margin-top: 20px;
+        margin-bottom: 10px;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -54,13 +64,11 @@ def get_connection():
     return client
 
 def search_and_process_book(query):
-    """Sucht Infos, BEHÄLT aber den deutschen Titel bei"""
-    # Wir nehmen standardmäßig DEINE Eingabe als Titel (als Title Case formatiert)
-    # Damit bleibt "Harry Potter und der Stein der Weisen" erhalten, auch wenn die API "Philosopher's Stone" liefert.
+    """Sucht Infos und übersetzt den gefundenen Titel ins Deutsche"""
+    # Standard: Wir nehmen erstmal deine Eingabe
     book_data = {"Titel": query, "Autor": "Unbekannt", "Genre": "Roman", "Cover": ""}
     
-    if not query: 
-        return None
+    if not query: return None
     
     try:
         clean_query = query.replace(" ", "+")
@@ -74,30 +82,38 @@ def search_and_process_book(query):
             if data.get("numFound", 0) > 0 and len(data.get("docs", [])) > 0:
                 item = data["docs"][0]
                 
-                # WICHTIG: Wir überschreiben den Titel NICHT mehr mit dem API-Ergebnis.
-                # Wir holen nur Autor und Cover.
+                # 1. TITEL FINDEN & ÜBERSETZEN
+                found_title = item.get("title", query)
+                try:
+                    # Wir übersetzen den gefundenen (oft englischen) Titel ins Deutsche
+                    translator = GoogleTranslator(source='auto', target='de')
+                    translated_title = translator.translate(found_title)
+                    book_data["Titel"] = translated_title
+                except:
+                    # Falls Übersetzung scheitert, nehmen wir den gefundenen Titel
+                    book_data["Titel"] = found_title
                 
-                # Autor
+                # 2. AUTOR
                 authors = item.get("author_name", [])
                 if authors:
                     book_data["Autor"] = authors[0]
                 
-                # Cover
+                # 3. COVER
                 cover_id = item.get("cover_i")
                 if cover_id:
                     book_data["Cover"] = f"https://covers.openlibrary.org/b/id/{cover_id}-M.jpg"
                 
-                # Genre
+                # 4. GENRE
                 subjects = item.get("subject", [])
                 if subjects:
                     raw_genre = subjects[0]
                     try:
-                        translator = GoogleTranslator(source='auto', target='de')
+                        # Genre übersetzen wir ja sowieso schon
                         book_data["Genre"] = translator.translate(raw_genre)
                     except:
                         book_data["Genre"] = raw_genre
             else:
-                st.warning(f"Keine automatischen Infos gefunden. Speichere deine Eingabe.")
+                st.warning(f"Nichts gefunden. Speichere '{query}'.")
         else:
             st.error(f"API Fehler: {response.status_code}")
                     
@@ -143,12 +159,12 @@ def main():
         with tab1:
             st.header("Neues Buch eintragen")
             with st.form("quick_add_form", clear_on_submit=True):
-                title_input = st.text_input("Titel (auf Deutsch):", placeholder="z.B. Harry Potter und der Stein der Weisen")
+                title_input = st.text_input("Titel oder Suchbegriff:", placeholder="z.B. Harry Potter 1")
                 rating = st.slider("Bewertung:", 1, 5, 5)
                 submitted = st.form_submit_button("💾 SPEICHERN & SUCHEN")
                 
                 if submitted and title_input:
-                    with st.spinner("Hole Autor & Cover..."):
+                    with st.spinner("Suche und übersetze Titel..."):
                         book_info = search_and_process_book(title_input)
                         
                         worksheet.append_row([
@@ -193,43 +209,36 @@ def main():
             st.header("Deine Sammlung")
             
             if not df.empty:
-                # --- MULTI-LÖSCHEN ---
+                # LÖSCHEN
                 with st.expander("🗑 Bücher löschen (Menü öffnen)"):
-                    st.write("Wähle hier alle Bücher aus, die weg sollen:")
+                    st.write("Wähle Bücher zum Löschen:")
                     all_titles = df["Titel"].tolist()
-                    
-                    # Multiselect erlaubt mehrere Auswahlen gleichzeitig
-                    delete_list = st.multiselect("Bücher auswählen:", all_titles)
+                    delete_list = st.multiselect("Auswahl:", all_titles)
                     
                     if delete_list:
-                        if st.button(f"{len(delete_list)} Buch/Bücher endgültig löschen"):
+                        if st.button(f"{len(delete_list)} Buch/Bücher löschen"):
                             try:
-                                with st.spinner("Lösche Daten..."):
-                                    # Wir müssen die Zeilennummern finden
+                                with st.spinner("Lösche..."):
                                     rows_to_delete = []
                                     for title in delete_list:
-                                        # Wir suchen nach dem Titel (Achtung: Findet nur das erste Vorkommen)
                                         cell = worksheet.find(title)
                                         rows_to_delete.append(cell.row)
                                     
-                                    # WICHTIG: Wir sortieren die Zeilennummern ABSTEIGEND (von unten nach oben).
-                                    # Warum? Wenn wir Zeile 5 löschen, wird Zeile 6 zur neuen Zeile 5.
-                                    # Wenn wir von unten löschen, bleiben die oberen Nummern korrekt.
+                                    # Von unten nach oben löschen
                                     rows_to_delete = sorted(list(set(rows_to_delete)), reverse=True)
-                                    
                                     for row_num in rows_to_delete:
                                         worksheet.delete_rows(row_num)
-                                        time.sleep(0.5) # Kurze Pause zur Sicherheit für Google API
+                                        time.sleep(0.5)
                                     
-                                    st.success("Erfolgreich gelöscht!")
+                                    st.success("Gelöscht!")
                                     time.sleep(1)
                                     st.rerun()
                             except Exception as e:
-                                st.error(f"Fehler beim Löschen: {e}")
+                                st.error(f"Fehler: {e}")
 
                 st.markdown("---")
                 
-                # SUCHE & SORTIERUNG
+                # SUCHE & EINSTELLUNGEN
                 col_search, col_sort = st.columns([2, 1])
                 with col_search:
                     search_term = st.text_input("🔍 Suche:", placeholder="Titel oder Autor...")
@@ -237,31 +246,90 @@ def main():
                     sort_option = st.selectbox("Sortieren:", ["Neueste zuerst", "Titel (A-Z)", "Autor (A-Z)", "Beste Bewertung"])
                 
                 df_display = df.copy()
+                
+                # Filter (Sucheingabe)
                 if search_term:
                     df_display = df_display[
                         df_display["Titel"].astype(str).str.contains(search_term, case=False) | 
                         df_display["Autor"].astype(str).str.contains(search_term, case=False)
                     ]
                 
-                if sort_option == "Titel (A-Z)": df_display = df_display.sort_values(by="Titel")
-                elif sort_option == "Autor (A-Z)": df_display = df_display.sort_values(by="Autor")
-                elif sort_option == "Beste Bewertung": df_display = df_display.sort_values(by="Bewertung", ascending=False)
-                else: df_display = df_display.iloc[::-1]
+                # --- LOGIK: SORTIERUNG & GRUPPIERUNG ---
+                
+                # Flag, ob wir Buchstaben-Gruppen anzeigen wollen
+                use_grouping = False
+                group_col = ""
 
+                if sort_option == "Titel (A-Z)":
+                    df_display = df_display.sort_values(by="Titel")
+                    use_grouping = True
+                    group_col = "Titel"
+                elif sort_option == "Autor (A-Z)":
+                    df_display = df_display.sort_values(by="Autor")
+                    use_grouping = True
+                    group_col = "Autor"
+                elif sort_option == "Beste Bewertung":
+                    df_display = df_display.sort_values(by="Bewertung", ascending=False)
+                else: 
+                    df_display = df_display.iloc[::-1]
+
+                # --- SCHNELL-AUSWAHL (NUR WENN A-Z SORTIERT IST) ---
+                if use_grouping and not df_display.empty:
+                    # Wir holen uns alle Anfangsbuchstaben
+                    df_display["First_Letter"] = df_display[group_col].astype(str).str[0].str.upper()
+                    available_letters = sorted(df_display["First_Letter"].unique().tolist())
+                    
+                    # Ein Auswahl-Menü für Buchstaben
+                    st.write("🔤 **Schnellauswahl:**")
+                    selected_letter = st.selectbox("Springe zu Buchstabe:", ["Alle anzeigen"] + available_letters)
+                    
+                    if selected_letter != "Alle anzeigen":
+                        df_display = df_display[df_display["First_Letter"] == selected_letter]
+
+                # ANZEIGE DER BÜCHER
                 st.write(f"Zeige {len(df_display)} Bücher:")
                 
-                for index, row in df_display.iterrows():
-                    with st.container(border=True):
-                        c1, c2 = st.columns([1, 4])
-                        with c1:
-                            if row.get("Cover"): st.image(row["Cover"], width=80)
-                            else: st.write("📚")
-                        with c2:
-                            st.markdown(f'<div class="book-title">{row["Titel"]}</div>', unsafe_allow_html=True)
-                            st.markdown(f'<div class="book-meta">Von {row["Autor"]} | {row["Genre"]}</div>', unsafe_allow_html=True)
-                            try: stars = "⭐" * int(float(row["Bewertung"]))
-                            except: stars = ""
-                            st.write(stars)
+                # Wenn wir gruppieren (A-Z), machen wir das mit Zwischenüberschriften
+                if use_grouping and not df_display.empty:
+                    # Sicherstellen, dass First_Letter da ist (falls oben "Alle anzeigen" gewählt wurde)
+                    if "First_Letter" not in df_display.columns:
+                         df_display["First_Letter"] = df_display[group_col].astype(str).str[0].str.upper()
+                    
+                    # Wir gruppieren die Daten
+                    grouped = df_display.groupby("First_Letter")
+                    
+                    for letter, group in grouped:
+                        # --- DER GROSSE BUCHSTABE ---
+                        st.markdown(f'<div class="letter-header">{letter}</div>', unsafe_allow_html=True)
+                        
+                        for index, row in group.iterrows():
+                            with st.container(border=True):
+                                c1, c2 = st.columns([1, 4])
+                                with c1:
+                                    if row.get("Cover"): st.image(row["Cover"], width=80)
+                                    else: st.write("📚")
+                                with c2:
+                                    st.markdown(f'<div class="book-title">{row["Titel"]}</div>', unsafe_allow_html=True)
+                                    st.markdown(f'<div class="book-meta">Von {row["Autor"]} | {row["Genre"]}</div>', unsafe_allow_html=True)
+                                    try: stars = "⭐" * int(float(row["Bewertung"]))
+                                    except: stars = ""
+                                    st.write(stars)
+
+                else:
+                    # Standard-Anzeige (Ohne Buchstaben-Header, z.B. bei "Neueste" oder "Bewertung")
+                    for index, row in df_display.iterrows():
+                        with st.container(border=True):
+                            c1, c2 = st.columns([1, 4])
+                            with c1:
+                                if row.get("Cover"): st.image(row["Cover"], width=80)
+                                else: st.write("📚")
+                            with c2:
+                                st.markdown(f'<div class="book-title">{row["Titel"]}</div>', unsafe_allow_html=True)
+                                st.markdown(f'<div class="book-meta">Von {row["Autor"]} | {row["Genre"]}</div>', unsafe_allow_html=True)
+                                try: stars = "⭐" * int(float(row["Bewertung"]))
+                                except: stars = ""
+                                st.write(stars)
+
             else:
                 st.info("Noch keine Bücher vorhanden.")
 
