@@ -96,36 +96,24 @@ def search_open_library(query):
     return None
 
 def process_genre(raw_genre):
-    """Verhindert, dass aus Roman 'römisch' wird"""
     if not raw_genre: return "Roman"
-    
-    # 1. Direkte Treffer abfangen (bevor der Übersetzer Quatsch macht)
-    if raw_genre in ["Roman", "Fiction", "Novel", "General", "Stories"]:
-        return "Roman"
+    if raw_genre in ["Roman", "Fiction", "Novel", "General", "Stories"]: return "Roman"
     if "Fantasy" in raw_genre: return "Fantasy"
     if "Thriller" in raw_genre or "Crime" in raw_genre: return "Krimi"
-    
-    # 2. Übersetzen
     try:
         translator = GoogleTranslator(source='auto', target='de')
         translated = translator.translate(raw_genre)
-        # 3. Notbremse für Übersetzungsfehler
         if "römisch" in translated.lower(): return "Roman"
         return translated
-    except:
-        return "Roman"
+    except: return "Roman"
 
 def search_initial(user_query):
     result = search_google_books(user_query)
     if not result:
         result = search_open_library(user_query)
-    
     if not result:
         return {"Titel": user_query, "Autor": "", "Genre": "Roman", "Cover": "", "Genre_Raw": "Roman"}
-    
-    # Genre bereinigen
     result["Genre"] = process_genre(result.get("Genre_Raw", "Roman"))
-    
     return result
 
 def check_cover_update(titel, autor):
@@ -185,78 +173,70 @@ def main():
             with st.form("search_form"):
                 col_search, col_btn = st.columns([3, 1])
                 with col_search:
-                    search_query = st.text_input("Titel:", placeholder="z.B. Harry Potter und der Stein der Weisen", label_visibility="collapsed")
+                    search_query = st.text_input("Titel:", placeholder="z.B. Harry Potter", label_visibility="collapsed")
                 with col_btn:
                     submitted_search = st.form_submit_button("🔍 Suchen")
 
             if submitted_search and search_query:
-                st.session_state.last_search = search_query # Eingabe merken
+                st.session_state.last_search = search_query
                 with st.spinner("Suche..."):
                     result = search_initial(search_query)
                     st.session_state.draft_book = result
             
             st.markdown("---")
 
-            # SCHRITT 2
+            # SCHRITT 2: NUR TEXT-FELDER, KEIN BILD
             if st.session_state.draft_book:
                 draft = st.session_state.draft_book
                 
                 st.header("2. Daten prüfen & ergänzen")
                 
-                c_img, c_form = st.columns([1, 2])
-                with c_img:
-                    if draft["Cover"]: st.image(draft["Cover"], width=120)
-                    else: st.write("📚 (Kein Bild)")
+                # TITEL
+                user_input_title = st.session_state.last_search if st.session_state.last_search else draft["Titel"]
+                final_title = st.text_input("Titel:", value=user_input_title)
                 
-                with c_form:
-                    # TITEL: Hier nehmen wir jetzt standardmäßig DEINE Sucheingabe!
-                    # Wir ignorieren den englischen Titel der API, außer du änderst es selbst.
-                    user_input_title = st.session_state.last_search if st.session_state.last_search else draft["Titel"]
-                    final_title = st.text_input("Titel:", value=user_input_title)
+                # AUTOR
+                found_author = draft["Autor"]
+                select_options = ["➕ Neuer Autor / Manuelle Eingabe"] + existing_authors
+                default_index = 0
+                if found_author in existing_authors:
+                    default_index = select_options.index(found_author)
+                
+                selected_option = st.selectbox("Autor auswählen:", options=select_options, index=default_index)
+                
+                if selected_option == "➕ Neuer Autor / Manuelle Eingabe":
+                    final_author = st.text_input("Autor eintippen:", value=found_author)
+                else:
+                    final_author = selected_option
+                    st.caption(f"Autor '{final_author}' übernommen.")
+
+                final_rating = st.slider("Bewertung:", 1, 5, 5)
+                save_btn = st.button("💾 In Liste speichern")
+                
+                if save_btn:
+                    # Cover im Hintergrund managen
+                    final_cover = draft["Cover"]
+                    if final_author != draft["Autor"] and final_author.strip() != "":
+                        with st.spinner("Autor geändert... suche passendes Cover im Hintergrund..."):
+                            new_cover = check_cover_update(final_title, final_author)
+                            if new_cover: final_cover = new_cover
+
+                    worksheet.append_row([
+                        final_title,
+                        final_author,
+                        draft["Genre"], 
+                        final_rating,
+                        final_cover
+                    ])
                     
-                    # AUTOR
-                    found_author = draft["Autor"]
-                    select_options = ["➕ Neuer Autor / Manuelle Eingabe"] + existing_authors
-                    default_index = 0
-                    if found_author in existing_authors:
-                        default_index = select_options.index(found_author)
-                    
-                    selected_option = st.selectbox("Autor auswählen:", options=select_options, index=default_index)
-                    
-                    if selected_option == "➕ Neuer Autor / Manuelle Eingabe":
-                        final_author = st.text_input("Autor eintippen:", value=found_author)
+                    st.success(f"Gespeichert: {final_title}")
+                    if show_animation:
+                        st.balloons()
+                        time.sleep(2)
                     else:
-                        final_author = selected_option
-                        # Kleiner Hinweis, damit man weiß, dass es geklappt hat
-                        st.caption(f"Autor '{final_author}' übernommen.")
-
-                    final_rating = st.slider("Bewertung:", 1, 5, 5)
-                    save_btn = st.button("💾 In Liste speichern")
-                    
-                    if save_btn:
-                        # Cover aktualisieren falls Autor geändert
-                        final_cover = draft["Cover"]
-                        if final_author != draft["Autor"] and final_author.strip() != "":
-                            with st.spinner("Autor geändert... suche passendes Cover..."):
-                                new_cover = check_cover_update(final_title, final_author)
-                                if new_cover: final_cover = new_cover
-
-                        worksheet.append_row([
-                            final_title,
-                            final_author,
-                            draft["Genre"], 
-                            final_rating,
-                            final_cover
-                        ])
-                        
-                        st.success(f"Gespeichert: {final_title}")
-                        if show_animation:
-                            st.balloons()
-                            time.sleep(2)
-                        else:
-                            time.sleep(1)
-                        st.session_state.draft_book = None
-                        st.rerun()
+                        time.sleep(1)
+                    st.session_state.draft_book = None
+                    st.rerun()
 
         # --- TAB 2: LISTE ---
         with tab2:
