@@ -15,7 +15,6 @@ st.markdown("""
     .stApp { background-color: #f5f5dc; }
     .stApp, .stMarkdown, p, div, label, h1, h2, h3, h4, span { color: #4a3b2a !important; }
     
-    /* Buttons */
     .stButton button {
         background-color: #d35400 !important;
         color: white !important;
@@ -26,7 +25,6 @@ st.markdown("""
         padding: 10px;
     }
 
-    /* Tabs groß & lesbar */
     .stTabs [data-baseweb="tab"] {
         font-size: 1.5rem !important;
         padding: 15px !important;
@@ -34,7 +32,6 @@ st.markdown("""
         color: #4a3b2a;
     }
     
-    /* Tabelle hübsch machen */
     div[data-testid="stDataFrame"] {
         background-color: white;
         padding: 10px;
@@ -42,7 +39,6 @@ st.markdown("""
         box-shadow: 0 2px 5px rgba(0,0,0,0.1);
     }
     
-    /* Eingabefelder */
     .stTextInput input, .stSelectbox div[data-baseweb="select"] {
         background-color: #fffaf0 !important;
         border: 1px solid #d35400 !important;
@@ -131,6 +127,12 @@ def check_cover_update(titel, autor):
                 return data["items"][0]["volumeInfo"].get("imageLinks", {}).get("thumbnail", "")
     except: return ""
     return ""
+
+def get_lastname(full_name):
+    """Hilfsfunktion: Holt das letzte Wort als Nachnamen"""
+    if not isinstance(full_name, str) or not full_name.strip():
+        return ""
+    return full_name.strip().split(" ")[-1]
 
 # --- HAUPTPROGRAMM ---
 def main():
@@ -247,7 +249,7 @@ def main():
                     st.session_state.search_step = 1
                     st.rerun()
 
-        # --- TAB 2: LISTE ---
+        # --- TAB 2: LISTE (MIT NACHNAMEN-SORTIERUNG) ---
         with tab2:
             st.header("Deine Sammlung")
             
@@ -259,7 +261,10 @@ def main():
                 with col_search:
                     search_filter = st.text_input("🔍 Liste durchsuchen:", placeholder="Titel oder Autor...")
                 with col_sort:
-                    sort_option = st.selectbox("Sortieren:", ["Neueste zuerst", "Titel (A-Z)", "Autor (A-Z)", "Beste Bewertung"])
+                    # "Autor (A-Z)" ist jetzt standardmäßig ausgewählt
+                    sort_option = st.selectbox("Sortieren:", 
+                                               ["Autor (A-Z)", "Titel (A-Z)", "Neueste zuerst", "Beste Bewertung"],
+                                               index=0) # Index 0 = Autor ist Standard
                 
                 df_view = df.copy()
                 if search_filter:
@@ -268,19 +273,23 @@ def main():
                         df_view["Autor"].astype(str).str.contains(search_filter, case=False)
                     ]
                 
-                if sort_option == "Titel (A-Z)": df_view = df_view.sort_values(by="Titel")
-                elif sort_option == "Autor (A-Z)": df_view = df_view.sort_values(by="Autor")
-                elif sort_option == "Beste Bewertung": df_view = df_view.sort_values(by="Bewertung", ascending=False)
-                else: df_view = df_view.iloc[::-1]
+                # --- SORTIER-LOGIK ---
+                if sort_option == "Autor (A-Z)":
+                    # Wir erstellen temporär eine Nachnamen-Spalte für die Sortierung
+                    df_view["_Nachname"] = df_view["Autor"].apply(get_lastname)
+                    df_view = df_view.sort_values(by="_Nachname")
+                elif sort_option == "Titel (A-Z)":
+                    df_view = df_view.sort_values(by="Titel")
+                elif sort_option == "Beste Bewertung":
+                    df_view = df_view.sort_values(by="Bewertung", ascending=False)
+                else: 
+                    df_view = df_view.iloc[::-1]
 
                 st.write(f"Zeige {len(df_view)} Bücher:")
                 
-                # --- WICHTIGE ÄNDERUNG: FORMULAR ---
-                # Die Tabelle ist jetzt in einem Formular ("form"). 
-                # Das verhindert, dass die Seite nach jedem Klick auf ein Häkchen neu lädt!
                 with st.form("list_form"):
-                    
-                    # Hier verschieben wir die Spalten: Titel links, Bild & Löschen rechts
+                    # WICHTIG: Die temporäre Spalte "_Nachname" zeigen wir NICHT an.
+                    # Wir nehmen nur die originalen Spalten + Löschen.
                     cols = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Löschen"]
                     
                     edited_df = st.data_editor(
@@ -306,13 +315,10 @@ def main():
                         use_container_width=True
                     )
                     
-                    # Der Button zum Bestätigen der Änderungen
-                    # Erst wenn man HIER klickt, wird gelöscht (und die Seite lädt neu)
                     st.write("")
                     delete_btn = st.form_submit_button("💾 Änderungen anwenden / Löschen ausführen", type="primary")
                     
                     if delete_btn:
-                        # Wir schauen, wo Haken gesetzt wurden (in der bearbeiteten Version)
                         rows_to_delete = edited_df[edited_df["Löschen"] == True]
                         
                         if not rows_to_delete.empty:
