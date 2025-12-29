@@ -27,11 +27,11 @@ st.markdown("""
         width: 100%;
     }
     
-    /* TABS NOCH GRÖSSER MACHEN */
+    /* TABS EXTRA GROSS */
     .stTabs [data-baseweb="tab"] {
-        font-size: 1.8rem !important; /* Sehr große Schrift */
-        padding: 20px !important;     /* Viel Platz zum Drücken */
-        font-weight: 800 !important;  /* Extra Fett */
+        font-size: 1.5rem !important;
+        padding: 15px !important;
+        font-weight: 800 !important;
         color: #4a3b2a;
     }
     
@@ -42,7 +42,7 @@ st.markdown("""
         border-radius: 10px;
     }
     
-    /* Eingabefelder etwas hervorheben */
+    /* Eingabefelder hervorheben */
     .stTextInput input {
         background-color: #fffaf0 !important;
         border: 1px solid #d35400 !important;
@@ -114,7 +114,6 @@ def search_open_library(query):
 
 def search_initial(user_query):
     """Erste Suche: Probieren, was zu finden"""
-    # Google bevorzugt
     result = search_google_books(user_query)
     if not result:
         result = search_open_library(user_query)
@@ -129,7 +128,6 @@ def search_initial(user_query):
             "Genre_Raw": "Roman"
         }
         
-    # Genre übersetzen wenn möglich
     try:
         translator = GoogleTranslator(source='auto', target='de')
         result["Genre"] = translator.translate(result["Genre_Raw"])
@@ -139,7 +137,7 @@ def search_initial(user_query):
     return result
 
 def check_cover_update(titel, autor):
-    """Zweite Chance: Wenn Autor korrigiert wurde, suchen wir schnell ein neues Cover"""
+    """Zweite Chance für ein Cover, wenn Autor korrigiert wurde"""
     try:
         query = f"{titel} {autor}"
         url = f"https://www.googleapis.com/books/v1/volumes?q={query}&maxResults=1"
@@ -156,7 +154,7 @@ def check_cover_update(titel, autor):
 def main():
     st.title("📚 Mamas Bücherwelt")
 
-    # Session State initialisieren (für die Vorschau)
+    # Session State initialisieren
     if "draft_book" not in st.session_state:
         st.session_state.draft_book = None
 
@@ -189,27 +187,30 @@ def main():
 
         tab1, tab2, tab3 = st.tabs(["📖 Neues Buch", "🔍 Meine Liste", "📊 Statistik"])
         
-        # --- TAB 1: EINGABE (Der neue Workflow) ---
+        # --- TAB 1: EINGABE (Robuste Version mit Formular) ---
         with tab1:
             st.header("1. Buch suchen")
-            
-            # Schritt 1: Suchen
-            col_search, col_btn = st.columns([3, 1])
-            with col_search:
-                search_query = st.text_input("Titel eingeben:", placeholder="z.B. Leon & Luise", label_visibility="collapsed")
-            with col_btn:
-                do_search = st.button("🔍 Suchen")
+            st.caption("Gib den Titel ein und drücke Enter oder Klicke auf 'Suchen'")
 
-            if do_search and search_query:
-                with st.spinner("Suche..."):
+            # WICHTIG: Das hier ist jetzt ein Formular.
+            # Das verhindert, dass die App "nichts tut", wenn man Enter drückt.
+            with st.form("search_form"):
+                col_search, col_btn = st.columns([3, 1])
+                with col_search:
+                    search_query = st.text_input("Titel:", placeholder="z.B. Leon & Luise", label_visibility="collapsed")
+                with col_btn:
+                    # Der Button gehört zum Formular
+                    submitted_search = st.form_submit_button("🔍 Suchen")
+
+            # Wenn gesucht wurde (Button ODER Enter):
+            if submitted_search and search_query:
+                with st.spinner("Suche in Datenbank..."):
                     result = search_initial(search_query)
-                    # WICHTIG: Wenn der gefundene Titel extrem abweicht, behalten wir lieber die Eingabe
-                    # Hier speichern wir das Ergebnis in den Zwischenspeicher
                     st.session_state.draft_book = result
             
             st.markdown("---")
 
-            # Schritt 2: Prüfen & Speichern (nur wenn gesucht wurde)
+            # Schritt 2: Ergebnis anzeigen und bearbeiten
             if st.session_state.draft_book:
                 draft = st.session_state.draft_book
                 
@@ -218,31 +219,28 @@ def main():
                 c_img, c_form = st.columns([1, 2])
                 
                 with c_img:
-                    # Bild anzeigen
                     if draft["Cover"]:
                         st.image(draft["Cover"], caption="Gefundenes Bild", width=120)
                     else:
                         st.write("📚 (Kein Bild)")
                 
                 with c_form:
-                    # HIER kann deine Mutter korrigieren!
-                    # Wir füllen die Felder mit dem, was die Suche gefunden hat.
-                    # Wenn da "Aristoteles" steht, kann sie es einfach löschen und "Alex Capus" schreiben.
-                    
+                    # Hier kann man alles ändern!
                     final_title = st.text_input("Titel:", value=draft["Titel"])
-                    final_author = st.text_input("Autor:", value=draft["Autor"], placeholder="Hier Autorennamen eintragen...")
+                    
+                    # Autor Feld: Falls die DB "Aristoteles" sagt, einfach löschen und "Alex Capus" tippen
+                    final_author = st.text_input("Autor:", value=draft["Autor"], placeholder="Autorennamen hier eintragen")
+                    
                     final_rating = st.slider("Bewertung:", 1, 5, 5)
                     
+                    # Speichern Button (außerhalb des Such-Formulars)
                     save_btn = st.button("💾 In Liste speichern")
                     
                     if save_btn:
-                        # Intelligenter Check: Wurde der Autor geändert?
-                        # Wenn ja, ist das alte Cover (Aristoteles) wahrscheinlich falsch.
-                        # Wir versuchen, ein besseres Cover zu finden.
+                        # Cover-Update Check: Wenn Autor geändert wurde, suchen wir ein besseres Cover
                         final_cover = draft["Cover"]
-                        
-                        if final_author != draft["Autor"]:
-                            with st.spinner("Autor geändert... suche passendes Cover..."):
+                        if final_author != draft["Autor"] and final_author.strip() != "":
+                            with st.spinner("Neuer Autor erkannt... suche passendes Cover..."):
                                 new_cover = check_cover_update(final_title, final_author)
                                 if new_cover:
                                     final_cover = new_cover
@@ -251,7 +249,7 @@ def main():
                         worksheet.append_row([
                             final_title,
                             final_author,
-                            draft["Genre"], # Genre lassen wir meistens so
+                            draft["Genre"], 
                             final_rating,
                             final_cover
                         ])
@@ -285,7 +283,7 @@ def main():
                         else:
                             time.sleep(1)
                         
-                        # Aufräumen
+                        # Reset
                         st.session_state.draft_book = None
                         st.rerun()
 
@@ -300,6 +298,8 @@ def main():
                         st.write("Wähle Bücher zum Löschen:")
                         all_titles = df["Titel"].tolist()
                         delete_list = st.multiselect("Auswahl:", all_titles)
+                        
+                        # Dieser Button lädt die Seite erst neu, wenn er geklickt wird
                         delete_submitted = st.form_submit_button("Ausgewählte löschen")
                         
                         if delete_submitted and delete_list:
