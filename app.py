@@ -15,6 +15,7 @@ st.markdown("""
     .stApp { background-color: #f5f5dc; }
     .stApp, .stMarkdown, p, div, label, h1, h2, h3, h4, span { color: #4a3b2a !important; }
     
+    /* Buttons stylen */
     div[data-testid="stForm"] button {
         background-color: #d35400 !important;
         color: white !important;
@@ -26,16 +27,11 @@ st.markdown("""
         width: 100%;
     }
     
-    .book-title { font-size: 1.4rem; font-weight: 700; margin-bottom: 0px; color: #2c3e50 !important; }
-    .book-meta { font-size: 1.0rem; color: #7f8c8d !important; font-style: italic; margin-bottom: 5px; }
-    
-    .letter-header {
-        font-size: 2rem;
-        font-weight: bold;
-        color: #d35400 !important;
-        border-bottom: 2px solid #d35400;
-        margin-top: 20px;
-        margin-bottom: 10px;
+    /* Tabellen-Design Anpassungen */
+    div[data-testid="stDataFrame"] {
+        background-color: white;
+        padding: 10px;
+        border-radius: 10px;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -61,92 +57,65 @@ def get_connection():
     return client
 
 def search_google_books(query):
-    """Versuch 1: Google Books (Beste Daten, aber manchmal zickig)"""
+    """Suche via Google Books (Nur Metadaten)"""
     try:
-        # Wir filtern direkt nach Sprache DEUTSCH (langRestrict=de)
         url = f"https://www.googleapis.com/books/v1/volumes?q={query}&langRestrict=de&maxResults=1"
         response = requests.get(url)
-        
         if response.status_code == 200:
             data = response.json()
             if "items" in data:
                 info = data["items"][0]["volumeInfo"]
                 return {
-                    "source": "Google",
-                    "Titel": info.get("title", query),
                     "Autor": ", ".join(info.get("authors", ["Unbekannt"])),
                     "Cover": info.get("imageLinks", {}).get("thumbnail", ""),
                     "Genre_Raw": info.get("categories", ["Roman"])[0]
                 }
         return None
-    except:
-        return None
+    except: return None
 
 def search_open_library(query):
-    """Versuch 2: OpenLibrary (Als Backup, strikt auf Deutsch eingestellt)"""
+    """Suche via OpenLibrary (Nur Metadaten)"""
     try:
         clean_query = query.replace(" ", "+")
-        # Wir suchen explizit nach deutscher Sprache
         url = f"https://openlibrary.org/search.json?q={clean_query}&language=ger&limit=1"
         headers = {"User-Agent": "MamasBuecherweltApp/1.0"}
         response = requests.get(url, headers=headers)
-        
         if response.status_code == 200:
             data = response.json()
             if data.get("numFound", 0) > 0 and len(data.get("docs", [])) > 0:
                 item = data["docs"][0]
-                
-                # Cover ID holen
-                cover = ""
-                if item.get("cover_i"):
-                    cover = f"https://covers.openlibrary.org/b/id/{item.get('cover_i')}-M.jpg"
-                
-                # Autor holen
-                autor = "Unbekannt"
-                if item.get("author_name"):
-                    autor = item.get("author_name")[0]
-
-                # Genre holen
-                genre = "Roman"
-                if item.get("subject"):
-                    genre = item.get("subject")[0]
-
-                return {
-                    "source": "OpenLibrary",
-                    "Titel": item.get("title", query), # Wir nehmen den Titel der Datenbank
-                    "Autor": autor,
-                    "Cover": cover,
-                    "Genre_Raw": genre
-                }
+                cover = f"https://covers.openlibrary.org/b/id/{item.get('cover_i')}-M.jpg" if item.get("cover_i") else ""
+                autor = item.get("author_name")[0] if item.get("author_name") else "Unbekannt"
+                genre = item.get("subject")[0] if item.get("subject") else "Roman"
+                return {"Autor": autor, "Cover": cover, "Genre_Raw": genre}
         return None
-    except:
-        return None
+    except: return None
 
-def search_and_process_book(query):
-    """Die Haupt-Suchmaschine: Hybrid-Suche"""
+def search_and_process_book(user_title):
+    """
+    SICHERE SUCHE: 
+    Der Titel wird NICHT mehr von der Datenbank überschrieben.
+    Wir suchen nur nach Autor, Cover und Genre.
+    """
     
-    # 1. VERSUCH: GOOGLE BOOKS
-    result = search_google_books(query)
-    
-    # 2. VERSUCH: OPEN LIBRARY (Falls Google nichts findet)
-    if not result:
-        result = search_open_library(query)
-    
-    # DATEN AUFBEREITEN
+    # Standardwerte (Titel ist fix das, was eingegeben wurde!)
     book_data = {
-        "Titel": query, # Fallback: Deine Eingabe
+        "Titel": user_title, 
         "Autor": "Unbekannt",
         "Genre": "Roman",
         "Cover": ""
     }
-
+    
+    # Wir suchen trotzdem, um Lücken zu füllen
+    result = search_google_books(user_title)
+    if not result:
+        result = search_open_library(user_title)
+    
     if result:
-        # Wir übernehmen den Titel aus der Datenbank, aber OHNE Übersetzung
-        book_data["Titel"] = result["Titel"]
+        # Wir übernehmen NUR das Beiwerk, niemals den Titel
         book_data["Autor"] = result["Autor"]
         book_data["Cover"] = result["Cover"]
         
-        # Nur das Genre übersetzen wir (da "Fiction" -> "Belletristik" sinnvoll ist)
         try:
             translator = GoogleTranslator(source='auto', target='de')
             book_data["Genre"] = translator.translate(result["Genre_Raw"])
@@ -177,6 +146,7 @@ def main():
         
         if data:
             df = pd.DataFrame(data)
+            # Spaltenbereinigung
             rename_map = {}
             if "Cover_Link" in df.columns: rename_map["Cover_Link"] = "Cover"
             if "Bild" in df.columns: rename_map["Bild"] = "Cover"
@@ -192,14 +162,14 @@ def main():
         with tab1:
             st.header("Neues Buch eintragen")
             with st.form("quick_add_form", clear_on_submit=True):
-                # Hinweis für bessere Ergebnisse
-                st.caption("Tipp: Gib 'Titel Autor' ein für beste Ergebnisse (z.B. 'Leon Luise Capus')")
-                title_input = st.text_input("Titel:", placeholder="z.B. Harry Potter")
+                st.caption("Der Titel wird genau so gespeichert, wie du ihn hier eintippst.")
+                title_input = st.text_input("Titel:", placeholder="z.B. Leon & Luise")
                 rating = st.slider("Bewertung:", 1, 5, 5)
                 submitted = st.form_submit_button("💾 SPEICHERN & SUCHEN")
                 
                 if submitted and title_input:
-                    with st.spinner("Durchsuche deutsche Datenbanken..."):
+                    with st.spinner("Suche Cover & Autor..."):
+                        # Neue Logik: Titel bleibt fest!
                         book_info = search_and_process_book(title_input)
                         
                         worksheet.append_row([
@@ -239,118 +209,82 @@ def main():
                             time.sleep(1)
                         st.rerun()
 
-        # --- TAB 2: MEINE LISTE ---
+        # --- TAB 2: MEINE LISTE (TABELLEN-VERSION) ---
         with tab2:
             st.header("Deine Sammlung")
             
             if not df.empty:
-                # LÖSCHEN
-                with st.expander("🗑 Bücher löschen (Menü öffnen)"):
-                    st.write("Wähle Bücher zum Löschen:")
+                # 1. LÖSCHEN (Bleibt wie es ist, weil es gut funktioniert)
+                with st.expander("🗑 Bücher löschen"):
                     all_titles = df["Titel"].tolist()
-                    delete_list = st.multiselect("Auswahl:", all_titles)
+                    delete_list = st.multiselect("Welche Bücher sollen weg?", all_titles)
                     
                     if delete_list:
-                        if st.button(f"{len(delete_list)} Buch/Bücher löschen"):
-                            try:
-                                with st.spinner("Lösche..."):
-                                    rows_to_delete = []
-                                    for title in delete_list:
+                        if st.button(f"Löschen ({len(delete_list)})"):
+                            with st.spinner("Lösche..."):
+                                rows_to_delete = []
+                                for title in delete_list:
+                                    try:
                                         cell = worksheet.find(title)
                                         rows_to_delete.append(cell.row)
-                                    
-                                    # Von unten nach oben löschen
-                                    rows_to_delete = sorted(list(set(rows_to_delete)), reverse=True)
-                                    for row_num in rows_to_delete:
-                                        worksheet.delete_rows(row_num)
-                                        time.sleep(0.5)
-                                    
-                                    st.success("Gelöscht!")
-                                    time.sleep(1)
-                                    st.rerun()
-                            except Exception as e:
-                                st.error(f"Fehler beim Löschen: {e}")
+                                    except: pass
+                                
+                                rows_to_delete = sorted(list(set(rows_to_delete)), reverse=True)
+                                for row_num in rows_to_delete:
+                                    worksheet.delete_rows(row_num)
+                                    time.sleep(0.5)
+                                st.success("Gelöscht!")
+                                time.sleep(1)
+                                st.rerun()
 
                 st.markdown("---")
-                
-                # SUCHE & SORTIERUNG
-                col_search, col_sort = st.columns([2, 1])
-                with col_search:
-                    search_term = st.text_input("🔍 Suche:", placeholder="Titel oder Autor...")
-                with col_sort:
-                    sort_option = st.selectbox("Sortieren:", ["Neueste zuerst", "Titel (A-Z)", "Autor (A-Z)", "Beste Bewertung"])
-                
-                df_display = df.copy()
-                
-                if search_term:
-                    df_display = df_display[
-                        df_display["Titel"].astype(str).str.contains(search_term, case=False) | 
-                        df_display["Autor"].astype(str).str.contains(search_term, case=False)
+
+                # 2. FILTERN (Einfaches Suchfeld über der Tabelle)
+                search_filter = st.text_input("🔍 Schnell-Filter (Titel oder Autor):", placeholder="Tippe zum Filtern...")
+
+                # Daten filtern, falls was eingetippt wurde
+                df_view = df.copy()
+                if search_filter:
+                    df_view = df_view[
+                        df_view["Titel"].astype(str).str.contains(search_filter, case=False) | 
+                        df_view["Autor"].astype(str).str.contains(search_filter, case=False)
                     ]
+
+                # 3. DIE SCHÖNE TABELLE
+                # Wir nutzen st.dataframe mit "column_config", um Bilder und Sterne anzuzeigen
+                st.dataframe(
+                    df_view,
+                    column_config={
+                        "Cover": st.column_config.ImageColumn(
+                            "Cover", 
+                            help="Buchcover",
+                            width="small" # Macht das Bild schön kompakt
+                        ),
+                        "Titel": st.column_config.TextColumn(
+                            "Titel",
+                            width="medium"
+                        ),
+                        "Autor": st.column_config.TextColumn(
+                            "Autor",
+                            width="medium"
+                        ),
+                        "Genre": st.column_config.TextColumn(
+                            "Genre",
+                            width="small"
+                        ),
+                        "Bewertung": st.column_config.NumberColumn(
+                            "Sterne",
+                            help="Deine Bewertung (1-5)",
+                            format="%d ⭐", # Zeigt Zahl + Stern an
+                            width="small"
+                        )
+                    },
+                    use_container_width=True, # Nutzt die volle Breite
+                    hide_index=True # Versteckt die Zeilennummern (0, 1, 2...)
+                )
                 
-                # --- LOGIK: SORTIERUNG & GRUPPIERUNG ---
-                use_grouping = False
-                group_col = ""
+                st.caption("💡 Tipp: Klicke auf die Spalten-Namen (z.B. 'Titel'), um die Liste zu sortieren.")
 
-                if sort_option == "Titel (A-Z)":
-                    df_display = df_display.sort_values(by="Titel")
-                    use_grouping = True
-                    group_col = "Titel"
-                elif sort_option == "Autor (A-Z)":
-                    df_display = df_display.sort_values(by="Autor")
-                    use_grouping = True
-                    group_col = "Autor"
-                elif sort_option == "Beste Bewertung":
-                    df_display = df_display.sort_values(by="Bewertung", ascending=False)
-                else: 
-                    df_display = df_display.iloc[::-1]
-
-                # SCHNELL-AUSWAHL
-                if use_grouping and not df_display.empty:
-                    df_display["First_Letter"] = df_display[group_col].astype(str).str[0].str.upper()
-                    available_letters = sorted(df_display["First_Letter"].unique().tolist())
-                    
-                    st.write("🔤 **Schnellauswahl:**")
-                    selected_letter = st.selectbox("Springe zu Buchstabe:", ["Alle anzeigen"] + available_letters)
-                    
-                    if selected_letter != "Alle anzeigen":
-                        df_display = df_display[df_display["First_Letter"] == selected_letter]
-
-                st.write(f"Zeige {len(df_display)} Bücher:")
-                
-                if use_grouping and not df_display.empty:
-                    if "First_Letter" not in df_display.columns:
-                         df_display["First_Letter"] = df_display[group_col].astype(str).str[0].str.upper()
-                    
-                    grouped = df_display.groupby("First_Letter")
-                    
-                    for letter, group in grouped:
-                        st.markdown(f'<div class="letter-header">{letter}</div>', unsafe_allow_html=True)
-                        for index, row in group.iterrows():
-                            with st.container(border=True):
-                                c1, c2 = st.columns([1, 4])
-                                with c1:
-                                    if row.get("Cover"): st.image(row["Cover"], width=80)
-                                    else: st.write("📚")
-                                with c2:
-                                    st.markdown(f'<div class="book-title">{row["Titel"]}</div>', unsafe_allow_html=True)
-                                    st.markdown(f'<div class="book-meta">Von {row["Autor"]} | {row["Genre"]}</div>', unsafe_allow_html=True)
-                                    try: stars = "⭐" * int(float(row["Bewertung"]))
-                                    except: stars = ""
-                                    st.write(stars)
-                else:
-                    for index, row in df_display.iterrows():
-                        with st.container(border=True):
-                            c1, c2 = st.columns([1, 4])
-                            with c1:
-                                if row.get("Cover"): st.image(row["Cover"], width=80)
-                                else: st.write("📚")
-                            with c2:
-                                st.markdown(f'<div class="book-title">{row["Titel"]}</div>', unsafe_allow_html=True)
-                                st.markdown(f'<div class="book-meta">Von {row["Autor"]} | {row["Genre"]}</div>', unsafe_allow_html=True)
-                                try: stars = "⭐" * int(float(row["Bewertung"]))
-                                except: stars = ""
-                                st.write(stars)
             else:
                 st.info("Noch keine Bücher vorhanden.")
 
