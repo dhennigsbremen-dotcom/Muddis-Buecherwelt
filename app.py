@@ -56,30 +56,49 @@ def get_connection():
     return client
 
 def search_and_process_book(query):
-    """Sucht Buchinfos via Google Books API"""
+    """Sucht Buchinfos via Google Books API (Mit Browser-Tarnung)"""
+    # Standardwerte, falls nichts gefunden wird
     book_data = {"Titel": query, "Autor": "Unbekannt", "Genre": "Roman", "Cover": ""}
-    if not query: return None
+    
+    if not query: 
+        return None
     
     try:
         url = f"https://www.googleapis.com/books/v1/volumes?q={query}"
-        response = requests.get(url)
+        
+        # WICHTIG: Wir tarnen uns als normaler Browser, damit Google uns nicht blockiert
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        
+        response = requests.get(url, headers=headers)
         
         if response.status_code == 200:
             data = response.json()
             if "items" in data:
                 info = data["items"][0]["volumeInfo"]
+                
+                # Daten auslesen
                 book_data["Titel"] = info.get("title", query)
                 book_data["Autor"] = ", ".join(info.get("authors", ["Unbekannt"]))
                 book_data["Cover"] = info.get("imageLinks", {}).get("thumbnail", "")
                 
+                # Genre übersetzen
                 raw = info.get("categories", ["Roman"])
                 try: 
-                    book_data["Genre"] = GoogleTranslator(source='auto', target='de').translate(raw[0])
+                    # Kurzer Timeout für den Übersetzer, damit es nicht ewig hängt
+                    translator = GoogleTranslator(source='auto', target='de')
+                    book_data["Genre"] = translator.translate(raw[0])
                 except: 
                     book_data["Genre"] = raw[0]
+            else:
+                # Falls Google zwar antwortet, aber keine Bücher findet
+                st.warning(f"Google hat kein Buch zu '{query}' gefunden. Speichere Standard-Daten.")
+        else:
+            st.error(f"Verbindungsfehler zu Google Books: Code {response.status_code}")
                     
     except Exception as e: 
-        print(f"Fehler bei der Suche: {e}")
+        st.error(f"Ein technischer Fehler ist aufgetreten: {e}")
         
     return book_data
 
@@ -90,13 +109,12 @@ def main():
     # --- SEITENLEISTE (EINSTELLUNGEN) ---
     with st.sidebar:
         st.header("Einstellungen")
-        # Hier ist der Schalter für die Animation
         show_animation = st.checkbox("🎉 Animationen aktivieren", value=True)
     
     try:
         client = get_connection()
         if client is None:
-            st.stop() # Abbruch, wenn keine Verbindung möglich
+            st.stop() 
             
         sheet_name = "Mamas Bücherliste"
         sh = client.open(sheet_name)
@@ -109,7 +127,6 @@ def main():
         if data:
             df = pd.DataFrame(data)
             
-            # Spalten sicher umbenennen
             rename_map = {}
             if "Cover_Link" in df.columns: rename_map["Cover_Link"] = "Cover"
             if "Bild" in df.columns: rename_map["Bild"] = "Cover"
@@ -119,7 +136,6 @@ def main():
             if rename_map:
                 df = df.rename(columns=rename_map)
                 
-            # Sicherstellen, dass Spalten existieren
             for col in ["Cover", "Bewertung", "Titel", "Autor", "Genre"]:
                 if col not in df.columns:
                     df[col] = "" if col != "Bewertung" else 0
@@ -137,7 +153,10 @@ def main():
                 
                 if submitted and title_input:
                     with st.spinner("Suche Infos..."):
+                        # Hier rufen wir die verbesserte Suche auf
                         book_info = search_and_process_book(title_input)
+                        
+                        # In Google Sheets speichern
                         worksheet.append_row([
                             book_info["Titel"],
                             book_info["Autor"],
@@ -148,9 +167,8 @@ def main():
                         
                         st.success(f"Gespeichert: {book_info['Titel']}")
 
-                        # --- HIER IST DIE ANIMATION ---
+                        # --- ANIMATION ---
                         if show_animation:
-                            # CSS für das fliegende Buch
                             st.markdown("""
                                 <style>
                                 @keyframes flyBook {
@@ -174,21 +192,18 @@ def main():
                                     <div class="the-book">📖</div>
                                 </div>
                             """, unsafe_allow_html=True)
-                            
-                            # Wartezeit für die Animation
                             time.sleep(3.5)
                         else:
-                            # Kurze Wartezeit ohne Animation
                             time.sleep(1)
                             
                         st.rerun()
 
-        # --- TAB 2: MEINE LISTE (MIT SUCHE & SORTIERUNG) ---
+        # --- TAB 2: MEINE LISTE ---
         with tab2:
             st.header("Deine Sammlung")
             
             if not df.empty:
-                # 1. LÖSCHEN (Expander)
+                # Löschen
                 with st.expander("🗑 Buch löschen"):
                     all_titles = df["Titel"].tolist()
                     del_choice = st.selectbox("Buch wählen:", ["(Auswählen)"] + all_titles)
@@ -204,27 +219,22 @@ def main():
 
                 st.markdown("---")
                 
-                # 2. SUCHE & SORTIERUNG
+                # Suche & Sortierung
                 col_search, col_sort = st.columns([2, 1])
-                
                 with col_search:
                     search_term = st.text_input("🔍 Suche:", placeholder="Titel oder Autor...")
-                
                 with col_sort:
                     sort_option = st.selectbox("Sortieren:", 
                                                ["Neueste zuerst", "Titel (A-Z)", "Autor (A-Z)", "Beste Bewertung"])
                 
-                # --- LOGIK ANWENDEN ---
+                # Filter Logik
                 df_display = df.copy()
-                
-                # Filter
                 if search_term:
                     df_display = df_display[
                         df_display["Titel"].astype(str).str.contains(search_term, case=False) | 
                         df_display["Autor"].astype(str).str.contains(search_term, case=False)
                     ]
                 
-                # Sortierung
                 if sort_option == "Titel (A-Z)":
                     df_display = df_display.sort_values(by="Titel")
                 elif sort_option == "Autor (A-Z)":
@@ -232,7 +242,7 @@ def main():
                 elif sort_option == "Beste Bewertung":
                     df_display = df_display.sort_values(by="Bewertung", ascending=False)
                 else: 
-                    df_display = df_display.iloc[::-1] # Neueste zuerst
+                    df_display = df_display.iloc[::-1]
 
                 st.write(f"Zeige {len(df_display)} Bücher:")
                 
