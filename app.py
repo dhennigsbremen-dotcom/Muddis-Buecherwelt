@@ -37,15 +37,13 @@ st.markdown("""
 
 @st.cache_resource
 def get_connection():
-    """Verbindet zu Google Sheets - egal ob lokal oder in der Cloud"""
+    """Verbindet zu Google Sheets"""
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     
-    # Cloud-Check: Gibt es Secrets?
     if "gcp_service_account" in st.secrets:
         creds_dict = st.secrets["gcp_service_account"]
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     else:
-        # Fallback: Lokale Datei nutzen
         try:
             creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
         except FileNotFoundError:
@@ -56,49 +54,63 @@ def get_connection():
     return client
 
 def search_and_process_book(query):
-    """Sucht Buchinfos via Google Books API (Mit Browser-Tarnung)"""
-    # Standardwerte, falls nichts gefunden wird
+    """Sucht Buchinfos via OpenLibrary API (Blockadesicherer als Google)"""
     book_data = {"Titel": query, "Autor": "Unbekannt", "Genre": "Roman", "Cover": ""}
     
     if not query: 
         return None
     
     try:
-        url = f"https://www.googleapis.com/books/v1/volumes?q={query}"
+        # Wir nutzen jetzt OpenLibrary Search
+        # Leerzeichen im Titel durch '+' ersetzen
+        clean_query = query.replace(" ", "+")
+        url = f"https://openlibrary.org/search.json?q={clean_query}&limit=1"
         
-        # WICHTIG: Wir tarnen uns als normaler Browser, damit Google uns nicht blockiert
+        # User-Agent header ist trotzdem gut, gehört zum guten Ton
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            "User-Agent": "MamasBuecherweltApp/1.0 (hobby project)"
         }
         
         response = requests.get(url, headers=headers)
         
         if response.status_code == 200:
             data = response.json()
-            if "items" in data:
-                info = data["items"][0]["volumeInfo"]
+            # Prüfen ob 'docs' existiert und nicht leer ist
+            if data.get("numFound", 0) > 0 and len(data.get("docs", [])) > 0:
+                item = data["docs"][0]
                 
-                # Daten auslesen
-                book_data["Titel"] = info.get("title", query)
-                book_data["Autor"] = ", ".join(info.get("authors", ["Unbekannt"]))
-                book_data["Cover"] = info.get("imageLinks", {}).get("thumbnail", "")
+                # DATEN AUSLESEN
+                # Titel
+                book_data["Titel"] = item.get("title", query)
                 
-                # Genre übersetzen
-                raw = info.get("categories", ["Roman"])
-                try: 
-                    # Kurzer Timeout für den Übersetzer, damit es nicht ewig hängt
-                    translator = GoogleTranslator(source='auto', target='de')
-                    book_data["Genre"] = translator.translate(raw[0])
-                except: 
-                    book_data["Genre"] = raw[0]
+                # Autor (OpenLibrary gibt eine Liste zurück)
+                authors = item.get("author_name", [])
+                if authors:
+                    book_data["Autor"] = authors[0] # Wir nehmen den ersten Autor
+                
+                # Cover ID suchen
+                cover_id = item.get("cover_i")
+                if cover_id:
+                    # OpenLibrary Cover URL bauen
+                    book_data["Cover"] = f"https://covers.openlibrary.org/b/id/{cover_id}-M.jpg"
+                
+                # Genre/Subjekt
+                subjects = item.get("subject", [])
+                if subjects:
+                    # Nimm das erste sinnvolle Wort
+                    raw_genre = subjects[0]
+                    try:
+                        translator = GoogleTranslator(source='auto', target='de')
+                        book_data["Genre"] = translator.translate(raw_genre)
+                    except:
+                        book_data["Genre"] = raw_genre
             else:
-                # Falls Google zwar antwortet, aber keine Bücher findet
-                st.warning(f"Google hat kein Buch zu '{query}' gefunden. Speichere Standard-Daten.")
+                st.warning(f"Kein Buch gefunden für '{query}'. Speichere Basis-Daten.")
         else:
-            st.error(f"Verbindungsfehler zu Google Books: Code {response.status_code}")
+            st.error(f"API Fehler: {response.status_code}")
                     
     except Exception as e: 
-        st.error(f"Ein technischer Fehler ist aufgetreten: {e}")
+        st.error(f"Fehler bei der Suche: {e}")
         
     return book_data
 
@@ -106,41 +118,35 @@ def search_and_process_book(query):
 def main():
     st.title("📚 Mamas Bücherwelt")
 
-    # --- SEITENLEISTE (EINSTELLUNGEN) ---
+    # --- SEITENLEISTE ---
     with st.sidebar:
         st.header("Einstellungen")
         show_animation = st.checkbox("🎉 Animationen aktivieren", value=True)
     
     try:
         client = get_connection()
-        if client is None:
-            st.stop() 
+        if client is None: st.stop() 
             
         sheet_name = "Mamas Bücherliste"
         sh = client.open(sheet_name)
         worksheet = sh.sheet1
         
-        # --- DATEN LADEN & BEREINIGEN ---
+        # Daten laden
         data = worksheet.get_all_records()
         df = pd.DataFrame()
         
         if data:
             df = pd.DataFrame(data)
-            
+            # Spalten normalisieren
             rename_map = {}
             if "Cover_Link" in df.columns: rename_map["Cover_Link"] = "Cover"
             if "Bild" in df.columns: rename_map["Bild"] = "Cover"
             if "Sterne" in df.columns: rename_map["Sterne"] = "Bewertung"
             if "Stars" in df.columns: rename_map["Stars"] = "Bewertung"
-            
-            if rename_map:
-                df = df.rename(columns=rename_map)
-                
+            if rename_map: df = df.rename(columns=rename_map)
             for col in ["Cover", "Bewertung", "Titel", "Autor", "Genre"]:
-                if col not in df.columns:
-                    df[col] = "" if col != "Bewertung" else 0
+                if col not in df.columns: df[col] = "" if col != "Bewertung" else 0
 
-        # TABS ERSTELLEN
         tab1, tab2, tab3 = st.tabs(["📖 Neues Buch", "🔍 Meine Liste", "📊 Statistik"])
         
         # --- TAB 1: EINGABE ---
@@ -152,11 +158,9 @@ def main():
                 submitted = st.form_submit_button("💾 SPEICHERN & SUCHEN")
                 
                 if submitted and title_input:
-                    with st.spinner("Suche Infos..."):
-                        # Hier rufen wir die verbesserte Suche auf
+                    with st.spinner("Suche Infos bei OpenLibrary..."):
                         book_info = search_and_process_book(title_input)
                         
-                        # In Google Sheets speichern
                         worksheet.append_row([
                             book_info["Titel"],
                             book_info["Autor"],
@@ -167,7 +171,6 @@ def main():
                         
                         st.success(f"Gespeichert: {book_info['Titel']}")
 
-                        # --- ANIMATION ---
                         if show_animation:
                             st.markdown("""
                                 <style>
@@ -188,14 +191,11 @@ def main():
                                     animation: flyBook 3s ease-in-out forwards;
                                 }
                                 </style>
-                                <div class="flying-book-container">
-                                    <div class="the-book">📖</div>
-                                </div>
+                                <div class="flying-book-container"><div class="the-book">📖</div></div>
                             """, unsafe_allow_html=True)
                             time.sleep(3.5)
                         else:
                             time.sleep(1)
-                            
                         st.rerun()
 
         # --- TAB 2: MEINE LISTE ---
@@ -203,31 +203,35 @@ def main():
             st.header("Deine Sammlung")
             
             if not df.empty:
-                # Löschen
-                with st.expander("🗑 Buch löschen"):
+                # --- LÖSCHEN (VERBESSERT) ---
+                with st.expander("🗑 Buch löschen (Menü öffnen)"):
+                    st.write("Wähle ein Buch zum Löschen aus:")
                     all_titles = df["Titel"].tolist()
-                    del_choice = st.selectbox("Buch wählen:", ["(Auswählen)"] + all_titles)
-                    if st.button("Löschen"):
-                        if del_choice != "(Auswählen)":
+                    # Wir fügen einen Key hinzu, damit sich das Element "frisch" anfühlt
+                    del_choice = st.selectbox("Titel auswählen:", ["(Bitte wählen)"] + all_titles, key="del_box")
+                    
+                    if st.button("Endgültig löschen"):
+                        if del_choice != "(Bitte wählen)":
                             try:
-                                cell = worksheet.find(del_choice)
-                                worksheet.delete_rows(cell.row)
-                                st.success("Gelöscht!")
-                                time.sleep(1)
-                                st.rerun()
-                            except: st.error("Nicht gefunden.")
+                                with st.spinner("Lösche Buch..."):
+                                    cell = worksheet.find(del_choice)
+                                    worksheet.delete_rows(cell.row)
+                                    st.success(f"'{del_choice}' wurde gelöscht!")
+                                    # Längere Pause, damit Google Sheets hinterherkommt (Lösung für das Doppelklick-Problem)
+                                    time.sleep(2) 
+                                    st.rerun()
+                            except: 
+                                st.error("Buch wurde nicht in der Tabelle gefunden (vielleicht schon weg?).")
 
                 st.markdown("---")
                 
-                # Suche & Sortierung
+                # SUCHE & SORTIERUNG
                 col_search, col_sort = st.columns([2, 1])
                 with col_search:
                     search_term = st.text_input("🔍 Suche:", placeholder="Titel oder Autor...")
                 with col_sort:
-                    sort_option = st.selectbox("Sortieren:", 
-                                               ["Neueste zuerst", "Titel (A-Z)", "Autor (A-Z)", "Beste Bewertung"])
+                    sort_option = st.selectbox("Sortieren:", ["Neueste zuerst", "Titel (A-Z)", "Autor (A-Z)", "Beste Bewertung"])
                 
-                # Filter Logik
                 df_display = df.copy()
                 if search_term:
                     df_display = df_display[
@@ -235,14 +239,10 @@ def main():
                         df_display["Autor"].astype(str).str.contains(search_term, case=False)
                     ]
                 
-                if sort_option == "Titel (A-Z)":
-                    df_display = df_display.sort_values(by="Titel")
-                elif sort_option == "Autor (A-Z)":
-                    df_display = df_display.sort_values(by="Autor")
-                elif sort_option == "Beste Bewertung":
-                    df_display = df_display.sort_values(by="Bewertung", ascending=False)
-                else: 
-                    df_display = df_display.iloc[::-1]
+                if sort_option == "Titel (A-Z)": df_display = df_display.sort_values(by="Titel")
+                elif sort_option == "Autor (A-Z)": df_display = df_display.sort_values(by="Autor")
+                elif sort_option == "Beste Bewertung": df_display = df_display.sort_values(by="Bewertung", ascending=False)
+                else: df_display = df_display.iloc[::-1]
 
                 st.write(f"Zeige {len(df_display)} Bücher:")
                 
@@ -250,17 +250,13 @@ def main():
                     with st.container(border=True):
                         c1, c2 = st.columns([1, 4])
                         with c1:
-                            if row.get("Cover"): 
-                                st.image(row["Cover"], width=80)
-                            else:
-                                st.write("📚")
+                            if row.get("Cover"): st.image(row["Cover"], width=80)
+                            else: st.write("📚")
                         with c2:
                             st.markdown(f'<div class="book-title">{row["Titel"]}</div>', unsafe_allow_html=True)
                             st.markdown(f'<div class="book-meta">Von {row["Autor"]} | {row["Genre"]}</div>', unsafe_allow_html=True)
-                            try:
-                                stars = "⭐" * int(float(row["Bewertung"]))
-                            except:
-                                stars = ""
+                            try: stars = "⭐" * int(float(row["Bewertung"]))
+                            except: stars = ""
                             st.write(stars)
             else:
                 st.info("Noch keine Bücher vorhanden.")
@@ -271,15 +267,12 @@ def main():
             if not df.empty:
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Anzahl", len(df))
-                if "Autor" in df.columns and not df["Autor"].empty: 
-                    c2.metric("Top Autor", df["Autor"].mode()[0])
-                if "Genre" in df.columns and not df["Genre"].empty: 
-                    c3.metric("Top Genre", df["Genre"].mode()[0])
+                if "Autor" in df.columns and not df["Autor"].empty: c2.metric("Top Autor", df["Autor"].mode()[0])
+                if "Genre" in df.columns and not df["Genre"].empty: c3.metric("Top Genre", df["Genre"].mode()[0])
                 
                 st.markdown("---")
                 total = len(df)
                 sc1, sc2 = st.columns(2)
-                
                 with sc1:
                     st.subheader("Nach Genre")
                     if "Genre" in df.columns:
