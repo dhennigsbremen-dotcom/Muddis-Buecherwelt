@@ -15,7 +15,6 @@ st.markdown("""
     .stApp { background-color: #f5f5dc; }
     .stApp, .stMarkdown, p, div, label, h1, h2, h3, h4, span { color: #4a3b2a !important; }
     
-    /* Buttons stylen */
     .stButton button {
         background-color: #d35400 !important;
         color: white !important;
@@ -27,7 +26,6 @@ st.markdown("""
         width: 100%;
     }
     
-    /* TABS EXTRA GROSS */
     .stTabs [data-baseweb="tab"] {
         font-size: 1.5rem !important;
         padding: 15px !important;
@@ -35,14 +33,12 @@ st.markdown("""
         color: #4a3b2a;
     }
     
-    /* Tabellen-Design */
     div[data-testid="stDataFrame"] {
         background-color: white;
         padding: 10px;
         border-radius: 10px;
     }
     
-    /* Eingabefelder hervorheben */
     .stTextInput input, .stSelectbox div[data-baseweb="select"] {
         background-color: #fffaf0 !important;
         border: 1px solid #d35400 !important;
@@ -55,24 +51,17 @@ st.markdown("""
 
 @st.cache_resource
 def get_connection():
-    """Verbindet zu Google Sheets"""
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-    
     if "gcp_service_account" in st.secrets:
         creds_dict = st.secrets["gcp_service_account"]
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     else:
         try:
             creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
-        except FileNotFoundError:
-            st.error("Weder Secrets noch credentials.json gefunden!")
-            return None
-            
-    client = gspread.authorize(creds)
-    return client
+        except FileNotFoundError: return None
+    return gspread.authorize(creds)
 
 def search_google_books(query):
-    """Suche via Google Books"""
     try:
         url = f"https://www.googleapis.com/books/v1/volumes?q={query}&langRestrict=de&maxResults=1"
         response = requests.get(url)
@@ -86,11 +75,10 @@ def search_google_books(query):
                     "Cover": info.get("imageLinks", {}).get("thumbnail", ""),
                     "Genre_Raw": info.get("categories", ["Roman"])[0]
                 }
-        return None
     except: return None
+    return None
 
 def search_open_library(query):
-    """Suche via OpenLibrary"""
     try:
         clean_query = query.replace(" ", "+")
         url = f"https://openlibrary.org/search.json?q={clean_query}&language=ger&limit=1"
@@ -103,57 +91,44 @@ def search_open_library(query):
                 cover = f"https://covers.openlibrary.org/b/id/{item.get('cover_i')}-M.jpg" if item.get("cover_i") else ""
                 autor = item.get("author_name")[0] if item.get("author_name") else "Unbekannt"
                 genre = item.get("subject")[0] if item.get("subject") else "Roman"
-                return {
-                    "Titel": item.get("title", query),
-                    "Autor": autor, 
-                    "Cover": cover, 
-                    "Genre_Raw": genre
-                }
-        return None
+                return {"Titel": item.get("title", query), "Autor": autor, "Cover": cover, "Genre_Raw": genre}
     except: return None
+    return None
+
+def process_genre(raw_genre):
+    """Verhindert, dass aus Roman 'römisch' wird"""
+    if not raw_genre: return "Roman"
+    
+    # 1. Direkte Treffer abfangen (bevor der Übersetzer Quatsch macht)
+    if raw_genre in ["Roman", "Fiction", "Novel", "General", "Stories"]:
+        return "Roman"
+    if "Fantasy" in raw_genre: return "Fantasy"
+    if "Thriller" in raw_genre or "Crime" in raw_genre: return "Krimi"
+    
+    # 2. Übersetzen
+    try:
+        translator = GoogleTranslator(source='auto', target='de')
+        translated = translator.translate(raw_genre)
+        # 3. Notbremse für Übersetzungsfehler
+        if "römisch" in translated.lower(): return "Roman"
+        return translated
+    except:
+        return "Roman"
 
 def search_initial(user_query):
-    """Erste Suche: Probieren, was zu finden"""
     result = search_google_books(user_query)
     if not result:
         result = search_open_library(user_query)
     
-    # Fallback
     if not result:
-        return {
-            "Titel": user_query,
-            "Autor": "",
-            "Genre": "Roman",
-            "Cover": "",
-            "Genre_Raw": "Roman"
-        }
-        
-    # --- GENRE FIX (Das "Römisch" Problem) ---
-    raw = result["Genre_Raw"]
-    # Bekannte englische Begriffe direkt hart auf Deutsch setzen, ohne Übersetzer
-    if raw in ["Fiction", "Novel", "Stories", "Literature"]:
-        result["Genre"] = "Roman"
-    elif "Fantasy" in raw:
-        result["Genre"] = "Fantasy"
-    elif "Thriller" in raw or "Crime" in raw or "Mystery" in raw:
-        result["Genre"] = "Krimi"
-    else:
-        # Nur wenn wir es nicht kennen, fragen wir den Übersetzer
-        try:
-            translator = GoogleTranslator(source='auto', target='de')
-            translated = translator.translate(raw)
-            # Wenn der Übersetzer "römisch" sagt, korrigieren wir das sofort
-            if "römisch" in translated.lower():
-                result["Genre"] = "Roman"
-            else:
-                result["Genre"] = translated
-        except:
-            result["Genre"] = "Roman"
-        
+        return {"Titel": user_query, "Autor": "", "Genre": "Roman", "Cover": "", "Genre_Raw": "Roman"}
+    
+    # Genre bereinigen
+    result["Genre"] = process_genre(result.get("Genre_Raw", "Roman"))
+    
     return result
 
 def check_cover_update(titel, autor):
-    """Zweite Chance für ein Cover"""
     try:
         query = f"{titel} {autor}"
         url = f"https://www.googleapis.com/books/v1/volumes?q={query}&maxResults=1"
@@ -162,8 +137,7 @@ def check_cover_update(titel, autor):
             data = response.json()
             if "items" in data:
                 return data["items"][0]["volumeInfo"].get("imageLinks", {}).get("thumbnail", "")
-    except:
-        return ""
+    except: return ""
     return ""
 
 # --- HAUPTPROGRAMM ---
@@ -172,6 +146,8 @@ def main():
 
     if "draft_book" not in st.session_state:
         st.session_state.draft_book = None
+    if "last_search" not in st.session_state:
+        st.session_state.last_search = ""
 
     with st.sidebar:
         st.header("Einstellungen")
@@ -179,17 +155,15 @@ def main():
     
     try:
         client = get_connection()
-        if client is None: st.stop() 
-            
+        if client is None: st.stop()
         sheet_name = "Mamas Bücherliste"
         sh = client.open(sheet_name)
         worksheet = sh.sheet1
         
-        # DATEN LADEN & AUTOREN LISTE ERSTELLEN
+        # Daten laden
         data = worksheet.get_all_records()
         df = pd.DataFrame()
         existing_authors = []
-        
         if data:
             df = pd.DataFrame(data)
             rename_map = {}
@@ -200,90 +174,68 @@ def main():
             if rename_map: df = df.rename(columns=rename_map)
             for col in ["Cover", "Bewertung", "Titel", "Autor", "Genre"]:
                 if col not in df.columns: df[col] = "" if col != "Bewertung" else 0
-            
-            # Autorenliste für das Dropdown
             if "Autor" in df.columns:
-                existing_authors = sorted(list(set(df["Autor"].astype(str).tolist())))
-                if "" in existing_authors: existing_authors.remove("")
+                existing_authors = sorted(list(set([a for a in df["Autor"].astype(str).tolist() if a.strip()])))
 
         tab1, tab2, tab3 = st.tabs(["📖 Neues Buch", "🔍 Meine Liste", "📊 Statistik"])
         
         # --- TAB 1: EINGABE ---
         with tab1:
             st.header("1. Buch suchen")
-            
             with st.form("search_form"):
                 col_search, col_btn = st.columns([3, 1])
                 with col_search:
-                    search_query = st.text_input("Titel:", placeholder="z.B. Leon & Luise", label_visibility="collapsed")
+                    search_query = st.text_input("Titel:", placeholder="z.B. Harry Potter und der Stein der Weisen", label_visibility="collapsed")
                 with col_btn:
                     submitted_search = st.form_submit_button("🔍 Suchen")
 
             if submitted_search and search_query:
+                st.session_state.last_search = search_query # Eingabe merken
                 with st.spinner("Suche..."):
                     result = search_initial(search_query)
                     st.session_state.draft_book = result
             
             st.markdown("---")
 
-            # SCHRITT 2: DATEN PRÜFEN MIT INTELLIGENTER AUTOREN-AUSWAHL
+            # SCHRITT 2
             if st.session_state.draft_book:
                 draft = st.session_state.draft_book
                 
                 st.header("2. Daten prüfen & ergänzen")
                 
                 c_img, c_form = st.columns([1, 2])
-                
                 with c_img:
-                    if draft["Cover"]:
-                        st.image(draft["Cover"], caption="Gefundenes Bild", width=120)
-                    else:
-                        st.write("📚 (Kein Bild)")
+                    if draft["Cover"]: st.image(draft["Cover"], width=120)
+                    else: st.write("📚 (Kein Bild)")
                 
                 with c_form:
-                    # TITEL
-                    final_title = st.text_input("Titel:", value=draft["Titel"])
+                    # TITEL: Hier nehmen wir jetzt standardmäßig DEINE Sucheingabe!
+                    # Wir ignorieren den englischen Titel der API, außer du änderst es selbst.
+                    user_input_title = st.session_state.last_search if st.session_state.last_search else draft["Titel"]
+                    final_title = st.text_input("Titel:", value=user_input_title)
                     
-                    # AUTOR - LOGIK FÜR AUTOVERVOLLSTÄNDIGUNG
-                    # Wir prüfen: Ist der gefundene Autor schon in der Liste?
+                    # AUTOR
                     found_author = draft["Autor"]
-                    
-                    # Optionen für das Dropdown: "Neuer Autor" + Alle existierenden
                     select_options = ["➕ Neuer Autor / Manuelle Eingabe"] + existing_authors
-                    
-                    # Standard-Auswahl bestimmen
-                    default_index = 0 # Standardmäßig auf "Neuer Autor"
+                    default_index = 0
                     if found_author in existing_authors:
-                        # Wenn Autor bekannt, wählen wir ihn direkt aus
                         default_index = select_options.index(found_author)
                     
-                    # Das Dropdown (Funktioniert wie Autocomplete beim Tippen!)
-                    selected_option = st.selectbox(
-                        "Autor auswählen (oder 'Neuer Autor' wählen):", 
-                        options=select_options,
-                        index=default_index,
-                        help="Tippe hier, um existierende Autoren zu suchen"
-                    )
-                    
-                    # Das Textfeld für den Namen
-                    # Wenn im Dropdown ein Autor gewählt wurde, nutzen wir den Namen.
-                    # Wenn "Neuer Autor" gewählt wurde, zeigen wir das Textfeld zum Tippen.
+                    selected_option = st.selectbox("Autor auswählen:", options=select_options, index=default_index)
                     
                     if selected_option == "➕ Neuer Autor / Manuelle Eingabe":
-                        # Textfeld anzeigen (Vorausgefüllt mit dem, was die API gefunden hat)
-                        final_author = st.text_input("Autorenname eintippen:", value=found_author)
+                        final_author = st.text_input("Autor eintippen:", value=found_author)
                     else:
-                        # Textfeld ausblenden oder deaktivieren (wir nehmen die Auswahl)
                         final_author = selected_option
-                        st.success(f"Autor '{final_author}' aus deiner Liste übernommen.")
+                        # Kleiner Hinweis, damit man weiß, dass es geklappt hat
+                        st.caption(f"Autor '{final_author}' übernommen.")
 
                     final_rating = st.slider("Bewertung:", 1, 5, 5)
-                    
                     save_btn = st.button("💾 In Liste speichern")
                     
                     if save_btn:
+                        # Cover aktualisieren falls Autor geändert
                         final_cover = draft["Cover"]
-                        # Cover-Update nur, wenn wir manuell was geändert haben und kein Bild da war oder sich Autor änderte
                         if final_author != draft["Autor"] and final_author.strip() != "":
                             with st.spinner("Autor geändert... suche passendes Cover..."):
                                 new_cover = check_cover_update(final_title, final_author)
@@ -298,63 +250,32 @@ def main():
                         ])
                         
                         st.success(f"Gespeichert: {final_title}")
-                        
                         if show_animation:
-                            st.markdown("""
-                                <style>
-                                @keyframes flyBook {
-                                    0%   { transform: translate(-10vw, 100vh) rotate(0deg) scale(0.5); opacity: 0; }
-                                    10%  { opacity: 1; }
-                                    90%  { opacity: 1; }
-                                    100% { transform: translate(110vw, -50vh) rotate(360deg) scale(1.5); opacity: 0; }
-                                }
-                                .flying-book-container {
-                                    position: fixed;
-                                    bottom: 0; left: 0; width: 100vw; height: 100vh;
-                                    pointer-events: none; z-index: 9999;
-                                }
-                                .the-book {
-                                    position: absolute;
-                                    font-size: 6rem;
-                                    animation: flyBook 3s ease-in-out forwards;
-                                }
-                                </style>
-                                <div class="flying-book-container"><div class="the-book">📖</div></div>
-                            """, unsafe_allow_html=True)
-                            time.sleep(3.5)
+                            st.balloons()
+                            time.sleep(2)
                         else:
                             time.sleep(1)
-                        
                         st.session_state.draft_book = None
                         st.rerun()
 
-        # --- TAB 2: MEINE LISTE ---
+        # --- TAB 2: LISTE ---
         with tab2:
             st.header("Deine Sammlung")
             if not df.empty:
                 with st.expander("🗑 Bücher löschen"):
                     with st.form("delete_form"):
-                        st.write("Wähle Bücher zum Löschen:")
-                        all_titles = df["Titel"].tolist()
-                        delete_list = st.multiselect("Auswahl:", all_titles)
-                        delete_submitted = st.form_submit_button("Ausgewählte löschen")
-                        if delete_submitted and delete_list:
+                        delete_list = st.multiselect("Löschen:", df["Titel"].tolist())
+                        if st.form_submit_button("Löschen") and delete_list:
                             with st.spinner("Lösche..."):
-                                rows_to_delete = []
                                 for title in delete_list:
-                                    try:
-                                        cell = worksheet.find(title)
-                                        rows_to_delete.append(cell.row)
+                                    try: worksheet.delete_rows(worksheet.find(title).row)
                                     except: pass
-                                rows_to_delete = sorted(list(set(rows_to_delete)), reverse=True)
-                                for row_num in rows_to_delete:
-                                    worksheet.delete_rows(row_num)
                                     time.sleep(0.5)
-                                st.success("Gelöscht!")
+                                st.success("Weg damit!")
                                 time.sleep(1)
                                 st.rerun()
                 st.markdown("---")
-                search_filter = st.text_input("🔍 Filter (Titel/Autor):", placeholder="Tippe zum Filtern...")
+                search_filter = st.text_input("🔍 Filter:", placeholder="Tippe zum Filtern...")
                 df_view = df.copy()
                 if search_filter:
                     df_view = df_view[
@@ -373,8 +294,7 @@ def main():
                     use_container_width=True,
                     hide_index=True
                 )
-            else:
-                st.info("Noch keine Bücher vorhanden.")
+            else: st.info("Leer.")
 
         # --- TAB 3: STATISTIK ---
         with tab3:
@@ -401,11 +321,9 @@ def main():
                             if a:
                                 st.write(f"**{a}**: {c}")
                                 st.progress(min(int((c/total)*100)/100, 1.0))
-            else:
-                st.write("Keine Daten.")
+            else: st.write("Keine Daten.")
 
-    except Exception as e:
-        st.error(f"Ein Fehler ist aufgetreten: {e}")
+    except Exception as e: st.error(f"Fehler: {e}")
 
 if __name__ == "__main__":
     main()
