@@ -15,7 +15,6 @@ st.markdown("""
     .stApp { background-color: #f5f5dc; }
     .stApp, .stMarkdown, p, div, label, h1, h2, h3, h4, span { color: #4a3b2a !important; }
     
-    /* Buttons stylen */
     div[data-testid="stForm"] button {
         background-color: #d35400 !important;
         color: white !important;
@@ -27,11 +26,9 @@ st.markdown("""
         width: 100%;
     }
     
-    /* Buch-Karte Design */
     .book-title { font-size: 1.4rem; font-weight: 700; margin-bottom: 0px; color: #2c3e50 !important; }
     .book-meta { font-size: 1.0rem; color: #7f8c8d !important; font-style: italic; margin-bottom: 5px; }
     
-    /* Buchstaben-Header Design */
     .letter-header {
         font-size: 2rem;
         font-weight: bold;
@@ -63,18 +60,35 @@ def get_connection():
     client = gspread.authorize(creds)
     return client
 
-def search_and_process_book(query):
-    """Sucht Infos und übersetzt den gefundenen Titel ins Deutsche"""
-    # Standard: Wir nehmen erstmal deine Eingabe
-    book_data = {"Titel": query, "Autor": "Unbekannt", "Genre": "Roman", "Cover": ""}
-    
-    if not query: return None
-    
+def search_google_books(query):
+    """Versuch 1: Google Books (Beste Daten, aber manchmal zickig)"""
+    try:
+        # Wir filtern direkt nach Sprache DEUTSCH (langRestrict=de)
+        url = f"https://www.googleapis.com/books/v1/volumes?q={query}&langRestrict=de&maxResults=1"
+        response = requests.get(url)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if "items" in data:
+                info = data["items"][0]["volumeInfo"]
+                return {
+                    "source": "Google",
+                    "Titel": info.get("title", query),
+                    "Autor": ", ".join(info.get("authors", ["Unbekannt"])),
+                    "Cover": info.get("imageLinks", {}).get("thumbnail", ""),
+                    "Genre_Raw": info.get("categories", ["Roman"])[0]
+                }
+        return None
+    except:
+        return None
+
+def search_open_library(query):
+    """Versuch 2: OpenLibrary (Als Backup, strikt auf Deutsch eingestellt)"""
     try:
         clean_query = query.replace(" ", "+")
-        url = f"https://openlibrary.org/search.json?q={clean_query}&limit=1"
+        # Wir suchen explizit nach deutscher Sprache
+        url = f"https://openlibrary.org/search.json?q={clean_query}&language=ger&limit=1"
         headers = {"User-Agent": "MamasBuecherweltApp/1.0"}
-        
         response = requests.get(url, headers=headers)
         
         if response.status_code == 200:
@@ -82,44 +96,63 @@ def search_and_process_book(query):
             if data.get("numFound", 0) > 0 and len(data.get("docs", [])) > 0:
                 item = data["docs"][0]
                 
-                # 1. TITEL FINDEN & ÜBERSETZEN
-                found_title = item.get("title", query)
-                try:
-                    # Wir übersetzen den gefundenen (oft englischen) Titel ins Deutsche
-                    translator = GoogleTranslator(source='auto', target='de')
-                    translated_title = translator.translate(found_title)
-                    book_data["Titel"] = translated_title
-                except:
-                    # Falls Übersetzung scheitert, nehmen wir den gefundenen Titel
-                    book_data["Titel"] = found_title
+                # Cover ID holen
+                cover = ""
+                if item.get("cover_i"):
+                    cover = f"https://covers.openlibrary.org/b/id/{item.get('cover_i')}-M.jpg"
                 
-                # 2. AUTOR
-                authors = item.get("author_name", [])
-                if authors:
-                    book_data["Autor"] = authors[0]
-                
-                # 3. COVER
-                cover_id = item.get("cover_i")
-                if cover_id:
-                    book_data["Cover"] = f"https://covers.openlibrary.org/b/id/{cover_id}-M.jpg"
-                
-                # 4. GENRE
-                subjects = item.get("subject", [])
-                if subjects:
-                    raw_genre = subjects[0]
-                    try:
-                        # Genre übersetzen wir ja sowieso schon
-                        book_data["Genre"] = translator.translate(raw_genre)
-                    except:
-                        book_data["Genre"] = raw_genre
-            else:
-                st.warning(f"Nichts gefunden. Speichere '{query}'.")
-        else:
-            st.error(f"API Fehler: {response.status_code}")
-                    
-    except Exception as e: 
-        st.error(f"Fehler bei der Suche: {e}")
+                # Autor holen
+                autor = "Unbekannt"
+                if item.get("author_name"):
+                    autor = item.get("author_name")[0]
+
+                # Genre holen
+                genre = "Roman"
+                if item.get("subject"):
+                    genre = item.get("subject")[0]
+
+                return {
+                    "source": "OpenLibrary",
+                    "Titel": item.get("title", query), # Wir nehmen den Titel der Datenbank
+                    "Autor": autor,
+                    "Cover": cover,
+                    "Genre_Raw": genre
+                }
+        return None
+    except:
+        return None
+
+def search_and_process_book(query):
+    """Die Haupt-Suchmaschine: Hybrid-Suche"""
+    
+    # 1. VERSUCH: GOOGLE BOOKS
+    result = search_google_books(query)
+    
+    # 2. VERSUCH: OPEN LIBRARY (Falls Google nichts findet)
+    if not result:
+        result = search_open_library(query)
+    
+    # DATEN AUFBEREITEN
+    book_data = {
+        "Titel": query, # Fallback: Deine Eingabe
+        "Autor": "Unbekannt",
+        "Genre": "Roman",
+        "Cover": ""
+    }
+
+    if result:
+        # Wir übernehmen den Titel aus der Datenbank, aber OHNE Übersetzung
+        book_data["Titel"] = result["Titel"]
+        book_data["Autor"] = result["Autor"]
+        book_data["Cover"] = result["Cover"]
         
+        # Nur das Genre übersetzen wir (da "Fiction" -> "Belletristik" sinnvoll ist)
+        try:
+            translator = GoogleTranslator(source='auto', target='de')
+            book_data["Genre"] = translator.translate(result["Genre_Raw"])
+        except:
+            book_data["Genre"] = result["Genre_Raw"]
+    
     return book_data
 
 # --- HAUPTPROGRAMM ---
@@ -159,12 +192,14 @@ def main():
         with tab1:
             st.header("Neues Buch eintragen")
             with st.form("quick_add_form", clear_on_submit=True):
-                title_input = st.text_input("Titel oder Suchbegriff:", placeholder="z.B. Harry Potter 1")
+                # Hinweis für bessere Ergebnisse
+                st.caption("Tipp: Gib 'Titel Autor' ein für beste Ergebnisse (z.B. 'Leon Luise Capus')")
+                title_input = st.text_input("Titel:", placeholder="z.B. Harry Potter")
                 rating = st.slider("Bewertung:", 1, 5, 5)
                 submitted = st.form_submit_button("💾 SPEICHERN & SUCHEN")
                 
                 if submitted and title_input:
-                    with st.spinner("Suche und übersetze Titel..."):
+                    with st.spinner("Durchsuche deutsche Datenbanken..."):
                         book_info = search_and_process_book(title_input)
                         
                         worksheet.append_row([
@@ -234,11 +269,11 @@ def main():
                                     time.sleep(1)
                                     st.rerun()
                             except Exception as e:
-                                st.error(f"Fehler: {e}")
+                                st.error(f"Fehler beim Löschen: {e}")
 
                 st.markdown("---")
                 
-                # SUCHE & EINSTELLUNGEN
+                # SUCHE & SORTIERUNG
                 col_search, col_sort = st.columns([2, 1])
                 with col_search:
                     search_term = st.text_input("🔍 Suche:", placeholder="Titel oder Autor...")
@@ -247,7 +282,6 @@ def main():
                 
                 df_display = df.copy()
                 
-                # Filter (Sucheingabe)
                 if search_term:
                     df_display = df_display[
                         df_display["Titel"].astype(str).str.contains(search_term, case=False) | 
@@ -255,8 +289,6 @@ def main():
                     ]
                 
                 # --- LOGIK: SORTIERUNG & GRUPPIERUNG ---
-                
-                # Flag, ob wir Buchstaben-Gruppen anzeigen wollen
                 use_grouping = False
                 group_col = ""
 
@@ -273,35 +305,27 @@ def main():
                 else: 
                     df_display = df_display.iloc[::-1]
 
-                # --- SCHNELL-AUSWAHL (NUR WENN A-Z SORTIERT IST) ---
+                # SCHNELL-AUSWAHL
                 if use_grouping and not df_display.empty:
-                    # Wir holen uns alle Anfangsbuchstaben
                     df_display["First_Letter"] = df_display[group_col].astype(str).str[0].str.upper()
                     available_letters = sorted(df_display["First_Letter"].unique().tolist())
                     
-                    # Ein Auswahl-Menü für Buchstaben
                     st.write("🔤 **Schnellauswahl:**")
                     selected_letter = st.selectbox("Springe zu Buchstabe:", ["Alle anzeigen"] + available_letters)
                     
                     if selected_letter != "Alle anzeigen":
                         df_display = df_display[df_display["First_Letter"] == selected_letter]
 
-                # ANZEIGE DER BÜCHER
                 st.write(f"Zeige {len(df_display)} Bücher:")
                 
-                # Wenn wir gruppieren (A-Z), machen wir das mit Zwischenüberschriften
                 if use_grouping and not df_display.empty:
-                    # Sicherstellen, dass First_Letter da ist (falls oben "Alle anzeigen" gewählt wurde)
                     if "First_Letter" not in df_display.columns:
                          df_display["First_Letter"] = df_display[group_col].astype(str).str[0].str.upper()
                     
-                    # Wir gruppieren die Daten
                     grouped = df_display.groupby("First_Letter")
                     
                     for letter, group in grouped:
-                        # --- DER GROSSE BUCHSTABE ---
                         st.markdown(f'<div class="letter-header">{letter}</div>', unsafe_allow_html=True)
-                        
                         for index, row in group.iterrows():
                             with st.container(border=True):
                                 c1, c2 = st.columns([1, 4])
@@ -314,9 +338,7 @@ def main():
                                     try: stars = "⭐" * int(float(row["Bewertung"]))
                                     except: stars = ""
                                     st.write(stars)
-
                 else:
-                    # Standard-Anzeige (Ohne Buchstaben-Header, z.B. bei "Neueste" oder "Bewertung")
                     for index, row in df_display.iterrows():
                         with st.container(border=True):
                             c1, c2 = st.columns([1, 4])
@@ -329,7 +351,6 @@ def main():
                                 try: stars = "⭐" * int(float(row["Bewertung"]))
                                 except: stars = ""
                                 st.write(stars)
-
             else:
                 st.info("Noch keine Bücher vorhanden.")
 
