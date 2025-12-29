@@ -15,17 +15,22 @@ st.markdown("""
     .stApp { background-color: #f5f5dc; }
     .stApp, .stMarkdown, p, div, label, h1, h2, h3, h4, span { color: #4a3b2a !important; }
     
+    /* Buttons generell */
     .stButton button {
         background-color: #d35400 !important;
         color: white !important;
         font-weight: bold !important;
-        font-size: 18px !important;
         border-radius: 8px;
-        padding: 12px 20px !important;
         border: none;
-        width: 100%;
     }
-    
+
+    /* Spezielle Buttons (Löschen / Abbrechen) etwas dezenter oder anders */
+    button[kind="secondary"] {
+        background-color: #7f8c8d !important;
+        color: white !important;
+    }
+
+    /* Tabs sehr groß */
     .stTabs [data-baseweb="tab"] {
         font-size: 1.5rem !important;
         padding: 15px !important;
@@ -33,16 +38,26 @@ st.markdown("""
         color: #4a3b2a;
     }
     
-    div[data-testid="stDataFrame"] {
-        background-color: white;
-        padding: 10px;
-        border-radius: 10px;
-    }
-    
+    /* Eingabefelder */
     .stTextInput input, .stSelectbox div[data-baseweb="select"] {
         background-color: #fffaf0 !important;
         border: 1px solid #d35400 !important;
         color: #2c3e50 !important;
+    }
+
+    /* Buchstaben-Header für die Liste */
+    .letter-header {
+        font-size: 2.5rem;
+        font-weight: 900;
+        color: #e67e22;
+        margin-top: 30px;
+        margin-bottom: 10px;
+        border-bottom: 3px solid #e67e22;
+    }
+    
+    /* Design für einzelne Buch-Zeile in der Liste */
+    .list-item-container {
+        padding: 10px 0;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -132,10 +147,11 @@ def check_cover_update(titel, autor):
 def main():
     st.title("📚 Mamas Bücherwelt")
 
+    # Session State initialisieren
     if "draft_book" not in st.session_state:
         st.session_state.draft_book = None
-    if "last_search" not in st.session_state:
-        st.session_state.last_search = ""
+    if "search_step" not in st.session_state:
+        st.session_state.search_step = 1 # 1 = Suchen, 2 = Prüfen
 
     with st.sidebar:
         st.header("Einstellungen")
@@ -167,33 +183,41 @@ def main():
 
         tab1, tab2, tab3 = st.tabs(["📖 Neues Buch", "🔍 Meine Liste", "📊 Statistik"])
         
-        # --- TAB 1: EINGABE ---
+        # --- TAB 1: EINGABE (WIZARD MODUS) ---
         with tab1:
-            st.header("1. Buch suchen")
-            with st.form("search_form"):
-                col_search, col_btn = st.columns([3, 1])
-                with col_search:
-                    search_query = st.text_input("Titel:", placeholder="z.B. Harry Potter", label_visibility="collapsed")
-                with col_btn:
-                    submitted_search = st.form_submit_button("🔍 Suchen")
+            # SCHRITT 1: NUR SUCHEN
+            if st.session_state.search_step == 1:
+                st.header("1. Welches Buch?")
+                with st.form("search_form"):
+                    col_search, col_btn = st.columns([3, 1])
+                    with col_search:
+                        search_query = st.text_input("Titel eingeben:", placeholder="z.B. Leon & Luise", label_visibility="collapsed")
+                    with col_btn:
+                        submitted_search = st.form_submit_button("🔍 Suchen")
 
-            if submitted_search and search_query:
-                st.session_state.last_search = search_query
-                with st.spinner("Suche..."):
-                    result = search_initial(search_query)
-                    st.session_state.draft_book = result
-            
-            st.markdown("---")
+                if submitted_search and search_query:
+                    with st.spinner("Suche..."):
+                        result = search_initial(search_query)
+                        st.session_state.draft_book = result
+                        # JETZT UMSCHALTEN AUF SCHRITT 2
+                        st.session_state.search_step = 2
+                        st.rerun()
 
-            # SCHRITT 2: NUR TEXT-FELDER, KEIN BILD
-            if st.session_state.draft_book:
+            # SCHRITT 2: NUR PRÜFEN (Suchfeld ist weg!)
+            elif st.session_state.search_step == 2 and st.session_state.draft_book:
                 draft = st.session_state.draft_book
                 
+                # Kleiner Zurück-Button ganz oben
+                if st.button("⬅️ Zurück / Anderes Buch suchen"):
+                    st.session_state.search_step = 1
+                    st.session_state.draft_book = None
+                    st.rerun()
+
+                st.markdown("---")
                 st.header("2. Daten prüfen & ergänzen")
                 
                 # TITEL
-                user_input_title = st.session_state.last_search if st.session_state.last_search else draft["Titel"]
-                final_title = st.text_input("Titel:", value=user_input_title)
+                final_title = st.text_input("Titel:", value=draft["Titel"])
                 
                 # AUTOR
                 found_author = draft["Autor"]
@@ -211,13 +235,14 @@ def main():
                     st.caption(f"Autor '{final_author}' übernommen.")
 
                 final_rating = st.slider("Bewertung:", 1, 5, 5)
-                save_btn = st.button("💾 In Liste speichern")
+                
+                # Großer Speicher-Button
+                save_btn = st.button("💾 Speichern & Fertig", type="primary")
                 
                 if save_btn:
-                    # Cover im Hintergrund managen
                     final_cover = draft["Cover"]
                     if final_author != draft["Autor"] and final_author.strip() != "":
-                        with st.spinner("Autor geändert... suche passendes Cover im Hintergrund..."):
+                        with st.spinner("Suche Cover..."):
                             new_cover = check_cover_update(final_title, final_author)
                             if new_cover: final_cover = new_cover
 
@@ -232,49 +257,102 @@ def main():
                     st.success(f"Gespeichert: {final_title}")
                     if show_animation:
                         st.balloons()
-                        time.sleep(2)
+                        time.sleep(1.5)
                     else:
                         time.sleep(1)
+                    
+                    # ALLES ZURÜCKSETZEN FÜRS NÄCHSTE BUCH
                     st.session_state.draft_book = None
+                    st.session_state.search_step = 1
                     st.rerun()
 
-        # --- TAB 2: LISTE ---
+        # --- TAB 2: LISTE (MIT GRUPPIERUNG & MÜLLEIMER) ---
         with tab2:
             st.header("Deine Sammlung")
+            
             if not df.empty:
-                with st.expander("🗑 Bücher löschen"):
-                    with st.form("delete_form"):
-                        delete_list = st.multiselect("Löschen:", df["Titel"].tolist())
-                        if st.form_submit_button("Löschen") and delete_list:
-                            with st.spinner("Lösche..."):
-                                for title in delete_list:
-                                    try: worksheet.delete_rows(worksheet.find(title).row)
-                                    except: pass
-                                    time.sleep(0.5)
-                                st.success("Weg damit!")
-                                time.sleep(1)
-                                st.rerun()
-                st.markdown("---")
-                search_filter = st.text_input("🔍 Filter:", placeholder="Tippe zum Filtern...")
+                # Filter & Sortierung
+                col_search, col_sort = st.columns([2, 1])
+                with col_search:
+                    search_filter = st.text_input("🔍 Liste durchsuchen:", placeholder="Titel oder Autor...")
+                with col_sort:
+                    sort_option = st.selectbox("Sortieren:", ["Neueste zuerst", "Titel (A-Z)", "Autor (A-Z)", "Beste Bewertung"])
+                
+                # 1. Filtern
                 df_view = df.copy()
                 if search_filter:
                     df_view = df_view[
                         df_view["Titel"].astype(str).str.contains(search_filter, case=False) | 
                         df_view["Autor"].astype(str).str.contains(search_filter, case=False)
                     ]
-                st.dataframe(
-                    df_view,
-                    column_config={
-                        "Cover": st.column_config.ImageColumn("Cover", width="small"),
-                        "Titel": st.column_config.TextColumn("Titel", width="medium"),
-                        "Autor": st.column_config.TextColumn("Autor", width="medium"),
-                        "Genre": st.column_config.TextColumn("Genre", width="small"),
-                        "Bewertung": st.column_config.NumberColumn("Sterne", format="%d ⭐", width="small")
-                    },
-                    use_container_width=True,
-                    hide_index=True
-                )
-            else: st.info("Leer.")
+                
+                # 2. Sortieren & Gruppierung vorbereiten
+                use_grouping = False
+                group_col = ""
+                
+                if sort_option == "Titel (A-Z)":
+                    df_view = df_view.sort_values(by="Titel")
+                    use_grouping = True
+                    group_col = "Titel"
+                elif sort_option == "Autor (A-Z)":
+                    df_view = df_view.sort_values(by="Autor")
+                    use_grouping = True
+                    group_col = "Autor"
+                elif sort_option == "Beste Bewertung":
+                    df_view = df_view.sort_values(by="Bewertung", ascending=False)
+                else: # Neueste zuerst
+                    df_view = df_view.iloc[::-1]
+
+                st.write(f"Zeige {len(df_view)} Bücher:")
+                
+                # --- LISTEN-ANZEIGE ---
+                current_letter = None
+                
+                for index, row in df_view.iterrows():
+                    # Gruppierungs-Header (A, B, C...)
+                    if use_grouping:
+                        # Ersten Buchstaben holen
+                        val = str(row[group_col]).strip()
+                        first_char = val[0].upper() if val else "?"
+                        
+                        if first_char != current_letter:
+                            st.markdown(f'<div class="letter-header">{first_char}</div>', unsafe_allow_html=True)
+                            current_letter = first_char
+
+                    # Die Buch-Karte (Zeile)
+                    with st.container(border=True):
+                        # Layout: Bild | Infos | Mülleimer
+                        c_img, c_info, c_del = st.columns([1, 4, 1])
+                        
+                        with c_img:
+                            if row["Cover"]: st.image(row["Cover"], width=60)
+                            else: st.write("📚")
+                        
+                        with c_info:
+                            st.markdown(f"**{row['Titel']}**")
+                            st.caption(f"{row['Autor']} | {row['Genre']}")
+                            try: stars = "⭐" * int(float(row["Bewertung"]))
+                            except: stars = ""
+                            st.write(stars)
+                            
+                        with c_del:
+                            # POPOVER: Klick öffnet ein Mini-Menü -> Sicherheit!
+                            with st.popover("🗑️", help="Löschen"):
+                                st.write("Wirklich löschen?")
+                                # Wir nutzen einen Key, damit jeder Button einzigartig ist
+                                if st.button("Ja, weg!", key=f"del_{index}"):
+                                    with st.spinner("..."):
+                                        try:
+                                            # Wir suchen das Buch im Original-Sheet
+                                            cell = worksheet.find(row["Titel"])
+                                            worksheet.delete_rows(cell.row)
+                                            st.toast("Buch gelöscht!") # Kleine Nachricht
+                                            time.sleep(1)
+                                            st.rerun()
+                                        except:
+                                            st.error("Fehler beim Finden.")
+
+            else: st.info("Noch keine Bücher vorhanden.")
 
         # --- TAB 3: STATISTIK ---
         with tab3:
