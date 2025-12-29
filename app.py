@@ -43,7 +43,7 @@ st.markdown("""
     }
     
     /* Eingabefelder hervorheben */
-    .stTextInput input {
+    .stTextInput input, .stSelectbox div[data-baseweb="select"] {
         background-color: #fffaf0 !important;
         border: 1px solid #d35400 !important;
         color: #2c3e50 !important;
@@ -118,7 +118,7 @@ def search_initial(user_query):
     if not result:
         result = search_open_library(user_query)
     
-    # Fallback, wenn gar nichts gefunden wird
+    # Fallback
     if not result:
         return {
             "Titel": user_query,
@@ -128,16 +128,32 @@ def search_initial(user_query):
             "Genre_Raw": "Roman"
         }
         
-    try:
-        translator = GoogleTranslator(source='auto', target='de')
-        result["Genre"] = translator.translate(result["Genre_Raw"])
-    except:
-        result["Genre"] = result["Genre_Raw"]
+    # --- GENRE FIX (Das "Römisch" Problem) ---
+    raw = result["Genre_Raw"]
+    # Bekannte englische Begriffe direkt hart auf Deutsch setzen, ohne Übersetzer
+    if raw in ["Fiction", "Novel", "Stories", "Literature"]:
+        result["Genre"] = "Roman"
+    elif "Fantasy" in raw:
+        result["Genre"] = "Fantasy"
+    elif "Thriller" in raw or "Crime" in raw or "Mystery" in raw:
+        result["Genre"] = "Krimi"
+    else:
+        # Nur wenn wir es nicht kennen, fragen wir den Übersetzer
+        try:
+            translator = GoogleTranslator(source='auto', target='de')
+            translated = translator.translate(raw)
+            # Wenn der Übersetzer "römisch" sagt, korrigieren wir das sofort
+            if "römisch" in translated.lower():
+                result["Genre"] = "Roman"
+            else:
+                result["Genre"] = translated
+        except:
+            result["Genre"] = "Roman"
         
     return result
 
 def check_cover_update(titel, autor):
-    """Zweite Chance für ein Cover, wenn Autor korrigiert wurde"""
+    """Zweite Chance für ein Cover"""
     try:
         query = f"{titel} {autor}"
         url = f"https://www.googleapis.com/books/v1/volumes?q={query}&maxResults=1"
@@ -154,7 +170,6 @@ def check_cover_update(titel, autor):
 def main():
     st.title("📚 Mamas Bücherwelt")
 
-    # Session State initialisieren
     if "draft_book" not in st.session_state:
         st.session_state.draft_book = None
 
@@ -170,9 +185,10 @@ def main():
         sh = client.open(sheet_name)
         worksheet = sh.sheet1
         
-        # Daten laden
+        # DATEN LADEN & AUTOREN LISTE ERSTELLEN
         data = worksheet.get_all_records()
         df = pd.DataFrame()
+        existing_authors = []
         
         if data:
             df = pd.DataFrame(data)
@@ -184,33 +200,33 @@ def main():
             if rename_map: df = df.rename(columns=rename_map)
             for col in ["Cover", "Bewertung", "Titel", "Autor", "Genre"]:
                 if col not in df.columns: df[col] = "" if col != "Bewertung" else 0
+            
+            # Autorenliste für das Dropdown
+            if "Autor" in df.columns:
+                existing_authors = sorted(list(set(df["Autor"].astype(str).tolist())))
+                if "" in existing_authors: existing_authors.remove("")
 
         tab1, tab2, tab3 = st.tabs(["📖 Neues Buch", "🔍 Meine Liste", "📊 Statistik"])
         
-        # --- TAB 1: EINGABE (Robuste Version mit Formular) ---
+        # --- TAB 1: EINGABE ---
         with tab1:
             st.header("1. Buch suchen")
-            st.caption("Gib den Titel ein und drücke Enter oder Klicke auf 'Suchen'")
-
-            # WICHTIG: Das hier ist jetzt ein Formular.
-            # Das verhindert, dass die App "nichts tut", wenn man Enter drückt.
+            
             with st.form("search_form"):
                 col_search, col_btn = st.columns([3, 1])
                 with col_search:
                     search_query = st.text_input("Titel:", placeholder="z.B. Leon & Luise", label_visibility="collapsed")
                 with col_btn:
-                    # Der Button gehört zum Formular
                     submitted_search = st.form_submit_button("🔍 Suchen")
 
-            # Wenn gesucht wurde (Button ODER Enter):
             if submitted_search and search_query:
-                with st.spinner("Suche in Datenbank..."):
+                with st.spinner("Suche..."):
                     result = search_initial(search_query)
                     st.session_state.draft_book = result
             
             st.markdown("---")
 
-            # Schritt 2: Ergebnis anzeigen und bearbeiten
+            # SCHRITT 2: DATEN PRÜFEN MIT INTELLIGENTER AUTOREN-AUSWAHL
             if st.session_state.draft_book:
                 draft = st.session_state.draft_book
                 
@@ -225,27 +241,54 @@ def main():
                         st.write("📚 (Kein Bild)")
                 
                 with c_form:
-                    # Hier kann man alles ändern!
+                    # TITEL
                     final_title = st.text_input("Titel:", value=draft["Titel"])
                     
-                    # Autor Feld: Falls die DB "Aristoteles" sagt, einfach löschen und "Alex Capus" tippen
-                    final_author = st.text_input("Autor:", value=draft["Autor"], placeholder="Autorennamen hier eintragen")
+                    # AUTOR - LOGIK FÜR AUTOVERVOLLSTÄNDIGUNG
+                    # Wir prüfen: Ist der gefundene Autor schon in der Liste?
+                    found_author = draft["Autor"]
                     
+                    # Optionen für das Dropdown: "Neuer Autor" + Alle existierenden
+                    select_options = ["➕ Neuer Autor / Manuelle Eingabe"] + existing_authors
+                    
+                    # Standard-Auswahl bestimmen
+                    default_index = 0 # Standardmäßig auf "Neuer Autor"
+                    if found_author in existing_authors:
+                        # Wenn Autor bekannt, wählen wir ihn direkt aus
+                        default_index = select_options.index(found_author)
+                    
+                    # Das Dropdown (Funktioniert wie Autocomplete beim Tippen!)
+                    selected_option = st.selectbox(
+                        "Autor auswählen (oder 'Neuer Autor' wählen):", 
+                        options=select_options,
+                        index=default_index,
+                        help="Tippe hier, um existierende Autoren zu suchen"
+                    )
+                    
+                    # Das Textfeld für den Namen
+                    # Wenn im Dropdown ein Autor gewählt wurde, nutzen wir den Namen.
+                    # Wenn "Neuer Autor" gewählt wurde, zeigen wir das Textfeld zum Tippen.
+                    
+                    if selected_option == "➕ Neuer Autor / Manuelle Eingabe":
+                        # Textfeld anzeigen (Vorausgefüllt mit dem, was die API gefunden hat)
+                        final_author = st.text_input("Autorenname eintippen:", value=found_author)
+                    else:
+                        # Textfeld ausblenden oder deaktivieren (wir nehmen die Auswahl)
+                        final_author = selected_option
+                        st.success(f"Autor '{final_author}' aus deiner Liste übernommen.")
+
                     final_rating = st.slider("Bewertung:", 1, 5, 5)
                     
-                    # Speichern Button (außerhalb des Such-Formulars)
                     save_btn = st.button("💾 In Liste speichern")
                     
                     if save_btn:
-                        # Cover-Update Check: Wenn Autor geändert wurde, suchen wir ein besseres Cover
                         final_cover = draft["Cover"]
+                        # Cover-Update nur, wenn wir manuell was geändert haben und kein Bild da war oder sich Autor änderte
                         if final_author != draft["Autor"] and final_author.strip() != "":
-                            with st.spinner("Neuer Autor erkannt... suche passendes Cover..."):
+                            with st.spinner("Autor geändert... suche passendes Cover..."):
                                 new_cover = check_cover_update(final_title, final_author)
-                                if new_cover:
-                                    final_cover = new_cover
+                                if new_cover: final_cover = new_cover
 
-                        # Speichern
                         worksheet.append_row([
                             final_title,
                             final_author,
@@ -254,9 +297,8 @@ def main():
                             final_cover
                         ])
                         
-                        st.success(f"Gespeichert: {final_title} von {final_author}")
+                        st.success(f"Gespeichert: {final_title}")
                         
-                        # Animation
                         if show_animation:
                             st.markdown("""
                                 <style>
@@ -283,25 +325,19 @@ def main():
                         else:
                             time.sleep(1)
                         
-                        # Reset
                         st.session_state.draft_book = None
                         st.rerun()
 
         # --- TAB 2: MEINE LISTE ---
         with tab2:
             st.header("Deine Sammlung")
-            
             if not df.empty:
-                # LÖSCHEN
                 with st.expander("🗑 Bücher löschen"):
                     with st.form("delete_form"):
                         st.write("Wähle Bücher zum Löschen:")
                         all_titles = df["Titel"].tolist()
                         delete_list = st.multiselect("Auswahl:", all_titles)
-                        
-                        # Dieser Button lädt die Seite erst neu, wenn er geklickt wird
                         delete_submitted = st.form_submit_button("Ausgewählte löschen")
-                        
                         if delete_submitted and delete_list:
                             with st.spinner("Lösche..."):
                                 rows_to_delete = []
@@ -317,10 +353,7 @@ def main():
                                 st.success("Gelöscht!")
                                 time.sleep(1)
                                 st.rerun()
-
                 st.markdown("---")
-
-                # Filter
                 search_filter = st.text_input("🔍 Filter (Titel/Autor):", placeholder="Tippe zum Filtern...")
                 df_view = df.copy()
                 if search_filter:
@@ -328,7 +361,6 @@ def main():
                         df_view["Titel"].astype(str).str.contains(search_filter, case=False) | 
                         df_view["Autor"].astype(str).str.contains(search_filter, case=False)
                     ]
-
                 st.dataframe(
                     df_view,
                     column_config={
@@ -352,7 +384,6 @@ def main():
                 c1.metric("Anzahl", len(df))
                 if "Autor" in df.columns and not df["Autor"].empty: c2.metric("Top Autor", df["Autor"].mode()[0])
                 if "Genre" in df.columns and not df["Genre"].empty: c3.metric("Top Genre", df["Genre"].mode()[0])
-                
                 st.markdown("---")
                 total = len(df)
                 sc1, sc2 = st.columns(2)
