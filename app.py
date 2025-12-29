@@ -54,50 +54,42 @@ def get_connection():
     return client
 
 def search_and_process_book(query):
-    """Sucht Buchinfos via OpenLibrary API (Blockadesicherer als Google)"""
+    """Sucht Infos, BEHÄLT aber den deutschen Titel bei"""
+    # Wir nehmen standardmäßig DEINE Eingabe als Titel (als Title Case formatiert)
+    # Damit bleibt "Harry Potter und der Stein der Weisen" erhalten, auch wenn die API "Philosopher's Stone" liefert.
     book_data = {"Titel": query, "Autor": "Unbekannt", "Genre": "Roman", "Cover": ""}
     
     if not query: 
         return None
     
     try:
-        # Wir nutzen jetzt OpenLibrary Search
-        # Leerzeichen im Titel durch '+' ersetzen
         clean_query = query.replace(" ", "+")
         url = f"https://openlibrary.org/search.json?q={clean_query}&limit=1"
-        
-        # User-Agent header ist trotzdem gut, gehört zum guten Ton
-        headers = {
-            "User-Agent": "MamasBuecherweltApp/1.0 (hobby project)"
-        }
+        headers = {"User-Agent": "MamasBuecherweltApp/1.0"}
         
         response = requests.get(url, headers=headers)
         
         if response.status_code == 200:
             data = response.json()
-            # Prüfen ob 'docs' existiert und nicht leer ist
             if data.get("numFound", 0) > 0 and len(data.get("docs", [])) > 0:
                 item = data["docs"][0]
                 
-                # DATEN AUSLESEN
-                # Titel
-                book_data["Titel"] = item.get("title", query)
+                # WICHTIG: Wir überschreiben den Titel NICHT mehr mit dem API-Ergebnis.
+                # Wir holen nur Autor und Cover.
                 
-                # Autor (OpenLibrary gibt eine Liste zurück)
+                # Autor
                 authors = item.get("author_name", [])
                 if authors:
-                    book_data["Autor"] = authors[0] # Wir nehmen den ersten Autor
+                    book_data["Autor"] = authors[0]
                 
-                # Cover ID suchen
+                # Cover
                 cover_id = item.get("cover_i")
                 if cover_id:
-                    # OpenLibrary Cover URL bauen
                     book_data["Cover"] = f"https://covers.openlibrary.org/b/id/{cover_id}-M.jpg"
                 
-                # Genre/Subjekt
+                # Genre
                 subjects = item.get("subject", [])
                 if subjects:
-                    # Nimm das erste sinnvolle Wort
                     raw_genre = subjects[0]
                     try:
                         translator = GoogleTranslator(source='auto', target='de')
@@ -105,7 +97,7 @@ def search_and_process_book(query):
                     except:
                         book_data["Genre"] = raw_genre
             else:
-                st.warning(f"Kein Buch gefunden für '{query}'. Speichere Basis-Daten.")
+                st.warning(f"Keine automatischen Infos gefunden. Speichere deine Eingabe.")
         else:
             st.error(f"API Fehler: {response.status_code}")
                     
@@ -118,7 +110,6 @@ def search_and_process_book(query):
 def main():
     st.title("📚 Mamas Bücherwelt")
 
-    # --- SEITENLEISTE ---
     with st.sidebar:
         st.header("Einstellungen")
         show_animation = st.checkbox("🎉 Animationen aktivieren", value=True)
@@ -137,7 +128,6 @@ def main():
         
         if data:
             df = pd.DataFrame(data)
-            # Spalten normalisieren
             rename_map = {}
             if "Cover_Link" in df.columns: rename_map["Cover_Link"] = "Cover"
             if "Bild" in df.columns: rename_map["Bild"] = "Cover"
@@ -153,12 +143,12 @@ def main():
         with tab1:
             st.header("Neues Buch eintragen")
             with st.form("quick_add_form", clear_on_submit=True):
-                title_input = st.text_input("Titel:", placeholder="z.B. Harry Potter")
+                title_input = st.text_input("Titel (auf Deutsch):", placeholder="z.B. Harry Potter und der Stein der Weisen")
                 rating = st.slider("Bewertung:", 1, 5, 5)
                 submitted = st.form_submit_button("💾 SPEICHERN & SUCHEN")
                 
                 if submitted and title_input:
-                    with st.spinner("Suche Infos bei OpenLibrary..."):
+                    with st.spinner("Hole Autor & Cover..."):
                         book_info = search_and_process_book(title_input)
                         
                         worksheet.append_row([
@@ -203,25 +193,39 @@ def main():
             st.header("Deine Sammlung")
             
             if not df.empty:
-                # --- LÖSCHEN (VERBESSERT) ---
-                with st.expander("🗑 Buch löschen (Menü öffnen)"):
-                    st.write("Wähle ein Buch zum Löschen aus:")
+                # --- MULTI-LÖSCHEN ---
+                with st.expander("🗑 Bücher löschen (Menü öffnen)"):
+                    st.write("Wähle hier alle Bücher aus, die weg sollen:")
                     all_titles = df["Titel"].tolist()
-                    # Wir fügen einen Key hinzu, damit sich das Element "frisch" anfühlt
-                    del_choice = st.selectbox("Titel auswählen:", ["(Bitte wählen)"] + all_titles, key="del_box")
                     
-                    if st.button("Endgültig löschen"):
-                        if del_choice != "(Bitte wählen)":
+                    # Multiselect erlaubt mehrere Auswahlen gleichzeitig
+                    delete_list = st.multiselect("Bücher auswählen:", all_titles)
+                    
+                    if delete_list:
+                        if st.button(f"{len(delete_list)} Buch/Bücher endgültig löschen"):
                             try:
-                                with st.spinner("Lösche Buch..."):
-                                    cell = worksheet.find(del_choice)
-                                    worksheet.delete_rows(cell.row)
-                                    st.success(f"'{del_choice}' wurde gelöscht!")
-                                    # Längere Pause, damit Google Sheets hinterherkommt (Lösung für das Doppelklick-Problem)
-                                    time.sleep(2) 
+                                with st.spinner("Lösche Daten..."):
+                                    # Wir müssen die Zeilennummern finden
+                                    rows_to_delete = []
+                                    for title in delete_list:
+                                        # Wir suchen nach dem Titel (Achtung: Findet nur das erste Vorkommen)
+                                        cell = worksheet.find(title)
+                                        rows_to_delete.append(cell.row)
+                                    
+                                    # WICHTIG: Wir sortieren die Zeilennummern ABSTEIGEND (von unten nach oben).
+                                    # Warum? Wenn wir Zeile 5 löschen, wird Zeile 6 zur neuen Zeile 5.
+                                    # Wenn wir von unten löschen, bleiben die oberen Nummern korrekt.
+                                    rows_to_delete = sorted(list(set(rows_to_delete)), reverse=True)
+                                    
+                                    for row_num in rows_to_delete:
+                                        worksheet.delete_rows(row_num)
+                                        time.sleep(0.5) # Kurze Pause zur Sicherheit für Google API
+                                    
+                                    st.success("Erfolgreich gelöscht!")
+                                    time.sleep(1)
                                     st.rerun()
-                            except: 
-                                st.error("Buch wurde nicht in der Tabelle gefunden (vielleicht schon weg?).")
+                            except Exception as e:
+                                st.error(f"Fehler beim Löschen: {e}")
 
                 st.markdown("---")
                 
