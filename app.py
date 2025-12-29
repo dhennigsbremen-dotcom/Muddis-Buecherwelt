@@ -86,6 +86,12 @@ def search_and_process_book(query):
 # --- HAUPTPROGRAMM ---
 def main():
     st.title("📚 Mamas Bücherwelt")
+
+    # --- SEITENLEISTE (EINSTELLUNGEN) ---
+    with st.sidebar:
+        st.header("Einstellungen")
+        # Hier ist der Schalter für die Animation
+        show_animation = st.checkbox("🎉 Animationen aktivieren", value=True)
     
     try:
         client = get_connection()
@@ -139,8 +145,42 @@ def main():
                             rating,
                             book_info["Cover"]
                         ])
+                        
                         st.success(f"Gespeichert: {book_info['Titel']}")
-                        time.sleep(1)
+
+                        # --- HIER IST DIE ANIMATION ---
+                        if show_animation:
+                            # CSS für das fliegende Buch
+                            st.markdown("""
+                                <style>
+                                @keyframes flyBook {
+                                    0%   { transform: translate(-10vw, 100vh) rotate(0deg) scale(0.5); opacity: 0; }
+                                    10%  { opacity: 1; }
+                                    90%  { opacity: 1; }
+                                    100% { transform: translate(110vw, -50vh) rotate(360deg) scale(1.5); opacity: 0; }
+                                }
+                                .flying-book-container {
+                                    position: fixed;
+                                    bottom: 0; left: 0; width: 100vw; height: 100vh;
+                                    pointer-events: none; z-index: 9999;
+                                }
+                                .the-book {
+                                    position: absolute;
+                                    font-size: 6rem;
+                                    animation: flyBook 3s ease-in-out forwards;
+                                }
+                                </style>
+                                <div class="flying-book-container">
+                                    <div class="the-book">📖</div>
+                                </div>
+                            """, unsafe_allow_html=True)
+                            
+                            # Wartezeit für die Animation
+                            time.sleep(3.5)
+                        else:
+                            # Kurze Wartezeit ohne Animation
+                            time.sleep(1)
+                            
                         st.rerun()
 
         # --- TAB 2: MEINE LISTE (MIT SUCHE & SORTIERUNG) ---
