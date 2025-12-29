@@ -34,35 +34,53 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --- FUNKTIONEN ---
+
 @st.cache_resource
 def get_connection():
-    scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
- # --- FUNKTIONEN ---
-@st.cache_resource
-def get_connection():
+    """Verbindet zu Google Sheets - egal ob lokal oder in der Cloud"""
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     
-    # TRICK: Wir schauen, ob wir in der Cloud sind oder lokal
+    # Cloud-Check: Gibt es Secrets?
     if "gcp_service_account" in st.secrets:
-        # Wir sind in der Cloud und laden die Infos aus den sicheren Secrets
         creds_dict = st.secrets["gcp_service_account"]
         creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     else:
-        # Wir sind lokal auf deinem PC und nutzen die Datei
-        creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
-        
+        # Fallback: Lokale Datei nutzen
+        try:
+            creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
+        except FileNotFoundError:
+            st.error("Weder Secrets noch credentials.json gefunden!")
+            return None
+            
     client = gspread.authorize(creds)
     return client
+
+def search_and_process_book(query):
+    """Sucht Buchinfos via Google Books API"""
+    book_data = {"Titel": query, "Autor": "Unbekannt", "Genre": "Roman", "Cover": ""}
+    if not query: return None
+    
+    try:
+        url = f"https://www.googleapis.com/books/v1/volumes?q={query}"
+        response = requests.get(url)
+        
+        if response.status_code == 200:
             data = response.json()
             if "items" in data:
                 info = data["items"][0]["volumeInfo"]
                 book_data["Titel"] = info.get("title", query)
                 book_data["Autor"] = ", ".join(info.get("authors", ["Unbekannt"]))
                 book_data["Cover"] = info.get("imageLinks", {}).get("thumbnail", "")
+                
                 raw = info.get("categories", ["Roman"])
-                try: book_data["Genre"] = GoogleTranslator(source='auto', target='de').translate(raw[0])
-                except: book_data["Genre"] = raw[0]
-    except Exception as e: print(f"Fehler: {e}")
+                try: 
+                    book_data["Genre"] = GoogleTranslator(source='auto', target='de').translate(raw[0])
+                except: 
+                    book_data["Genre"] = raw[0]
+                    
+    except Exception as e: 
+        print(f"Fehler bei der Suche: {e}")
+        
     return book_data
 
 # --- HAUPTPROGRAMM ---
@@ -71,6 +89,9 @@ def main():
     
     try:
         client = get_connection()
+        if client is None:
+            st.stop() # Abbruch, wenn keine Verbindung möglich
+            
         sheet_name = "Mamas Bücherliste"
         sh = client.open(sheet_name)
         worksheet = sh.sheet1
@@ -93,10 +114,9 @@ def main():
                 df = df.rename(columns=rename_map)
                 
             # Sicherstellen, dass Spalten existieren
-            if "Cover" not in df.columns: df["Cover"] = ""
-            if "Bewertung" not in df.columns: df["Bewertung"] = 0
-            if "Titel" not in df.columns: df["Titel"] = ""
-            if "Autor" not in df.columns: df["Autor"] = ""
+            for col in ["Cover", "Bewertung", "Titel", "Autor", "Genre"]:
+                if col not in df.columns:
+                    df[col] = "" if col != "Bewertung" else 0
 
         # TABS ERSTELLEN
         tab1, tab2, tab3 = st.tabs(["📖 Neues Buch", "🔍 Meine Liste", "📊 Statistik"])
@@ -130,7 +150,6 @@ def main():
             if not df.empty:
                 # 1. LÖSCHEN (Expander)
                 with st.expander("🗑 Buch löschen"):
-                    # Wir zeigen hier IMMER alle Titel an, unabhängig von der Suche unten
                     all_titles = df["Titel"].tolist()
                     del_choice = st.selectbox("Buch wählen:", ["(Auswählen)"] + all_titles)
                     if st.button("Löschen"):
@@ -146,41 +165,36 @@ def main():
                 st.markdown("---")
                 
                 # 2. SUCHE & SORTIERUNG
-                # Wir machen zwei Spalten: Links Suche, Rechts Sortierung
                 col_search, col_sort = st.columns([2, 1])
                 
                 with col_search:
-                    search_term = st.text_input("🔍 Suche nach Titel oder Autor...", placeholder="Tippe hier...")
+                    search_term = st.text_input("🔍 Suche:", placeholder="Titel oder Autor...")
                 
                 with col_sort:
-                    sort_option = st.selectbox("Sortieren nach:", 
+                    sort_option = st.selectbox("Sortieren:", 
                                                ["Neueste zuerst", "Titel (A-Z)", "Autor (A-Z)", "Beste Bewertung"])
                 
                 # --- LOGIK ANWENDEN ---
-                # Wir erstellen eine Kopie zum Filtern, damit das Original df erhalten bleibt
                 df_display = df.copy()
                 
-                # A) Filter (Suche)
+                # Filter
                 if search_term:
-                    # Sucht im Titel ODER im Autor (alles in Kleinbuchstaben umgewandelt für Treffergenauigkeit)
                     df_display = df_display[
                         df_display["Titel"].astype(str).str.contains(search_term, case=False) | 
                         df_display["Autor"].astype(str).str.contains(search_term, case=False)
                     ]
                 
-                # B) Sortierung
+                # Sortierung
                 if sort_option == "Titel (A-Z)":
                     df_display = df_display.sort_values(by="Titel")
                 elif sort_option == "Autor (A-Z)":
                     df_display = df_display.sort_values(by="Autor")
                 elif sort_option == "Beste Bewertung":
                     df_display = df_display.sort_values(by="Bewertung", ascending=False)
-                else: # "Neueste zuerst" (Standard)
-                    # Wir drehen die Liste einfach um (letzte Einträge zuerst)
-                    df_display = df_display.iloc[::-1]
+                else: 
+                    df_display = df_display.iloc[::-1] # Neueste zuerst
 
-                # 3. ANZEIGE DER KARTEN
-                st.write(f"Zeige {len(df_display)} Buch/Bücher:")
+                st.write(f"Zeige {len(df_display)} Bücher:")
                 
                 for index, row in df_display.iterrows():
                     with st.container(border=True):
@@ -194,7 +208,7 @@ def main():
                             st.markdown(f'<div class="book-title">{row["Titel"]}</div>', unsafe_allow_html=True)
                             st.markdown(f'<div class="book-meta">Von {row["Autor"]} | {row["Genre"]}</div>', unsafe_allow_html=True)
                             try:
-                                stars = "⭐" * int(row["Bewertung"])
+                                stars = "⭐" * int(float(row["Bewertung"]))
                             except:
                                 stars = ""
                             st.write(stars)
@@ -207,8 +221,10 @@ def main():
             if not df.empty:
                 c1, c2, c3 = st.columns(3)
                 c1.metric("Anzahl", len(df))
-                if "Autor" in df.columns: c2.metric("Top Autor", df["Autor"].mode()[0] if not df["Autor"].empty else "-")
-                if "Genre" in df.columns: c3.metric("Top Genre", df["Genre"].mode()[0] if not df["Genre"].empty else "-")
+                if "Autor" in df.columns and not df["Autor"].empty: 
+                    c2.metric("Top Autor", df["Autor"].mode()[0])
+                if "Genre" in df.columns and not df["Genre"].empty: 
+                    c3.metric("Top Genre", df["Genre"].mode()[0])
                 
                 st.markdown("---")
                 total = len(df)
@@ -220,14 +236,14 @@ def main():
                         for g, c in df["Genre"].value_counts().items():
                             if g:
                                 st.write(f"**{g}**: {c}")
-                                st.progress(int((c/total)*100)/100)
+                                st.progress(min(int((c/total)*100)/100, 1.0))
                 with sc2:
                     st.subheader("Top Autoren")
                     if "Autor" in df.columns:
                         for a, c in df["Autor"].value_counts().head(5).items():
                             if a:
                                 st.write(f"**{a}**: {c}")
-                                st.progress(int((c/total)*100)/100)
+                                st.progress(min(int((c/total)*100)/100, 1.0))
             else:
                 st.write("Keine Daten.")
 
