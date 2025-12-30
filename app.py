@@ -28,29 +28,25 @@ st.markdown("""
     }
 
     /* --- TAB DESIGN: GROSS & GETRENNT --- */
-    
-    /* Der Container für die Tabs: Abstand erzwingen */
     .stTabs [data-baseweb="tab-list"] {
         gap: 8px; /* Lücke zwischen den Tabs */
     }
 
-    /* Der einzelne Tab (inaktiv) */
     .stTabs [data-baseweb="tab"] {
         height: 50px;
-        background-color: #eaddcf; /* Helles Beige */
-        border-radius: 8px; /* Abgerundet */
+        background-color: #eaddcf;
+        border-radius: 8px;
         padding: 0px 10px !important;
-        font-size: 1.2rem !important; /* Große Schrift */
+        font-size: 1.2rem !important;
         font-weight: 700 !important;
         color: #4a3b2a;
-        border: 1px solid #d35400; /* Feiner Rand */
-        flex-grow: 1; /* Tabs füllen die ganze Breite aus */
+        border: 1px solid #d35400;
+        flex-grow: 1;
     }
 
-    /* Der AKTIVE Tab (ausgewählt) */
     .stTabs [aria-selected="true"] {
-        background-color: #d35400 !important; /* Orange */
-        color: white !important; /* Weiße Schrift */
+        background-color: #d35400 !important;
+        color: white !important;
     }
     
     /* Eingabefelder */
@@ -63,8 +59,9 @@ st.markdown("""
     
     /* Hinweise */
     .small-hint {
-        font-size: 0.9rem;
-        color: #7f8c8d !important;
+        font-size: 1.0rem;
+        color: #d35400 !important; /* Warnfarbe Orange */
+        font-weight: bold;
         margin-bottom: 5px;
     }
     </style>
@@ -85,7 +82,6 @@ def get_connection():
     return gspread.authorize(creds)
 
 def setup_sheets(client):
-    """Sorgt dafür, dass beide Tabellenblätter existieren"""
     sh = client.open("Mamas Bücherliste")
     ws_books = sh.sheet1
     try:
@@ -166,15 +162,19 @@ def main():
         if not df_authors.empty and "Name" in df_authors.columns:
             known_authors_list = [a for a in df_authors["Name"].tolist() if str(a).strip()]
 
-        # Tabs (Jetzt im Kachel-Design)
+        # Tabs (Kachel-Design)
         tab1, tab2, tab3 = st.tabs(["✍️ Neu", "👥 Autoren", "🔍 Liste"])
         
         # --- TAB 1: EINGABE ---
         with tab1:
             st.header("Buch eintragen")
-            st.markdown('<div class="small-hint">Einfach tippen: <b>Titel, Autor</b></div>', unsafe_allow_html=True)
             
-            raw_input = st.text_input("Eingabe:", placeholder="z.B. Amerika, Boyle")
+            # HIER IST DER NEUE HINWEIS
+            st.markdown('<div class="small-hint">Eingeben: Titel, Autor<br>(das Komma ist wichtig!!!)</div>', unsafe_allow_html=True)
+            
+            # HIER IST DAS NEUE PLACEHOLDER
+            raw_input = st.text_input("Eingabe:", placeholder="Titel, Autor")
+            
             rating = st.slider("Sterne:", 1, 5, 5)
             
             if st.button("💾 Speichern"):
@@ -205,7 +205,7 @@ def main():
                     else:
                         st.error("Text fehlt.")
                 else:
-                    st.error("⚠️ Komma vergessen! 'Titel, Autor'")
+                    st.error("⚠️ Komma vergessen! Bitte 'Titel, Autor' eingeben.")
 
         # --- TAB 2: AUTOREN ---
         with tab2:
@@ -270,7 +270,6 @@ def main():
                         df_view["Autor"].astype(str).str.contains(search, case=False)
                     ]
                 
-                # Hier: "Löschen" steht ganz links!
                 with st.form("list_view"):
                     edited_df = st.data_editor(
                         df_view,
