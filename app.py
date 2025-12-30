@@ -10,7 +10,7 @@ from deep_translator import GoogleTranslator
 st.set_page_config(page_title="Mamas Bibliothek", page_icon="📚", layout="centered")
 
 # --- KONSTANTEN ---
-NO_COVER_MARKER = "-" # Das Zeichen, das sagt: "Suche erfolglos, nicht nochmal probieren!"
+NO_COVER_MARKER = "-" 
 
 # --- DESIGN ---
 st.markdown("""
@@ -30,6 +30,7 @@ st.markdown("""
         margin-top: 10px;
     }
 
+    /* Tabs */
     .stTabs [data-baseweb="tab-list"] { gap: 8px; }
     .stTabs [data-baseweb="tab"] {
         height: 50px;
@@ -154,6 +155,7 @@ def process_genre(raw_genre):
         return translated
     except: return "Roman"
 
+# --- SUCHE (Google + OpenLibrary) ---
 def search_open_library_cover(titel, autor):
     try:
         query = f"{titel} {autor}".replace(" ", "+")
@@ -173,6 +175,7 @@ def fetch_book_data_background(titel, autor):
     cover = ""
     genre = "Roman"
     
+    # 1. Google
     try:
         query = f"{titel} {autor}"
         url = f"https://www.googleapis.com/books/v1/volumes?q={query}&langRestrict=de&maxResults=1"
@@ -186,6 +189,7 @@ def fetch_book_data_background(titel, autor):
                 genre = process_genre(raw_cat)
     except: pass
 
+    # 2. OpenLibrary (Joker)
     if not cover:
         try:
             ol_cover = search_open_library_cover(titel, autor)
@@ -207,19 +211,11 @@ def get_lastname(full_name):
     return full_name.strip().split(" ")[-1].lower()
 
 def silent_background_check(ws_books, df_books):
-    """
-    Sucht Cover für die ersten 3 leeren Einträge.
-    Setzt '-' wenn nichts gefunden wird, damit nicht erneut gesucht wird.
-    """
     if df_books.empty: return 0
     if "Cover" not in df_books.columns: return 0
     
-    # Finde Bücher, die leer sind UND KEINEN MARKER ("-") haben
+    # Bücher ohne Cover und OHNE Marker finden
     missing = df_books[ (df_books["Cover"] == "") | (df_books["Cover"].isnull()) ]
-    # Filtern: Schmeiß raus, was wir schon als "nicht gefunden" markiert haben (falls es im DF noch nicht aktualisiert ist)
-    # Da wir Daten von GSheets lesen, sollte "-" schon drin stehen, wenn es existiert.
-    
-    # WICHTIG: Das DataFrame liest "-" als Text ein.
     missing = missing[ missing["Cover"] != NO_COVER_MARKER ]
     
     if not missing.empty:
@@ -246,11 +242,9 @@ def silent_background_check(ws_books, df_books):
             try:
                 cell = ws_books.find(tit)
                 if nc:
-                    # Bild gefunden -> Speichern
                     ws_books.update_cell(cell.row, idx_c + 1, nc)
                     updates += 1
                 else:
-                    # NICHTS gefunden -> Marker setzen!
                     ws_books.update_cell(cell.row, idx_c + 1, NO_COVER_MARKER)
                 
                 time.sleep(1)
@@ -286,7 +280,8 @@ def main():
             updates = silent_background_check(ws_books, st.session_state.df_books)
             st.session_state.background_check_done = True
             if updates > 0:
-                st.toast(f"✨ Habe {updates} fehlende Bilder nachgeladen!", icon="🕵️‍♂️")
+                st.toast(f"✨ Habe {updates} fehlende Bilder nachgeladen! (Klicke auf 'Neu laden' zum Sehen)", icon="🕵️‍♂️")
+                # Optional: Wir könnten hier das lokale DF updaten, aber ein Reload ist sicherer
 
         known_authors_list = []
         if not st.session_state.df_authors.empty:
@@ -313,16 +308,15 @@ def main():
                             final_author = get_smart_author_name(autor_frag, known_authors_list)
                             c, g = fetch_book_data_background(titel, final_author)
                             
-                            # Wenn nix gefunden, Marker setzen
                             final_cover = c if c else NO_COVER_MARKER
                             
                             ws_books.append_row([titel, final_author, g, rating, final_cover])
                             del st.session_state.df_books
                         
                         st.success(f"Gespeichert: {titel}")
-                        st.balloons()
+                        st.balloons() # Hier fliegen sie jetzt!
                         st.session_state.input_key += 1
-                        time.sleep(1)
+                        time.sleep(2.0) # Länger warten, damit man die Ballons sieht
                         st.rerun()
                     else: st.error("Text fehlt.")
                 else: st.error("⚠️ Komma vergessen!")
@@ -368,12 +362,12 @@ def main():
             if not df_books.empty:
                 df_books["Löschen"] = False
                 
-                # --- WICHTIG: Marker (-) für die Anzeige verstecken ---
-                # Wir ersetzen "-" durch None, damit Streamlit einfach "nichts" anzeigt,
-                # statt einem komischen Link-Symbol.
+                # Marker ausblenden
                 df_books["Cover"] = df_books["Cover"].replace(NO_COVER_MARKER, None)
                 
-                search = st.text_input("🔍 Suchen:", placeholder="Titel...", label_visibility="collapsed")
+                # FIXED KEY für das Suchfeld verhindert das Springen!
+                search = st.text_input("🔍 Suchen:", placeholder="Titel...", key="search_box_fixed")
+                
                 df_books["_Nachname"] = df_books["Autor"].apply(get_lastname)
                 df_view = df_books.sort_values(by="_Nachname")
                 
@@ -428,7 +422,7 @@ def main():
                             if idx_t >= 0 and idx_c >= 0:
                                 for i, row in enumerate(all_vals[1:], start=2):
                                     cov = row[idx_c] if len(row) > idx_c else ""
-                                    # Manuell sucht IMMER, auch wenn Marker (-) gesetzt ist
+                                    # Manuell sucht IMMER, auch wenn Marker gesetzt ist (Reset)
                                     if not cov or cov == NO_COVER_MARKER:
                                         tit = row[idx_t] if len(row) > idx_t else ""
                                         aut = row[idx_a] if len(row) > idx_a else ""
@@ -440,7 +434,6 @@ def main():
                                                 ws_books.update_cell(i, idx_c+1, nc)
                                                 updates += 1
                                             else:
-                                                # Wieder Marker setzen (zur Bestätigung)
                                                 ws_books.update_cell(i, idx_c+1, NO_COVER_MARKER)
                                             
                                             time.sleep(1.5)
