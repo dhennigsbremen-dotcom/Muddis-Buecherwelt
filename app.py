@@ -15,6 +15,7 @@ st.markdown("""
     .stApp { background-color: #f5f5dc; }
     .stApp, .stMarkdown, p, div, label, h1, h2, h3, h4, span { color: #4a3b2a !important; }
     
+    /* Buttons */
     .stButton button {
         background-color: #d35400 !important;
         color: white !important;
@@ -25,6 +26,7 @@ st.markdown("""
         padding: 10px;
     }
 
+    /* Tabs groß & lesbar */
     .stTabs [data-baseweb="tab"] {
         font-size: 1.5rem !important;
         padding: 15px !important;
@@ -32,6 +34,7 @@ st.markdown("""
         color: #4a3b2a;
     }
     
+    /* Tabelle hübsch machen */
     div[data-testid="stDataFrame"] {
         background-color: white;
         padding: 10px;
@@ -39,6 +42,7 @@ st.markdown("""
         box-shadow: 0 2px 5px rgba(0,0,0,0.1);
     }
     
+    /* Eingabefelder */
     .stTextInput input, .stSelectbox div[data-baseweb="select"] {
         background-color: #fffaf0 !important;
         border: 1px solid #d35400 !important;
@@ -61,41 +65,37 @@ def get_connection():
         except FileNotFoundError: return None
     return gspread.authorize(creds)
 
-def search_google_books(query):
+def fetch_background_info(titel, autor):
+    """
+    Sucht im HINTERGRUND nach Cover & Genre.
+    Ändert aber niemals den Titel oder Autor!
+    """
     try:
+        query = f"{titel} {autor}"
         url = f"https://www.googleapis.com/books/v1/volumes?q={query}&langRestrict=de&maxResults=1"
         response = requests.get(url)
+        
+        cover = ""
+        genre = "Roman" # Standardwert
+        
         if response.status_code == 200:
             data = response.json()
             if "items" in data:
                 info = data["items"][0]["volumeInfo"]
-                return {
-                    "Titel": info.get("title", query),
-                    "Autor": ", ".join(info.get("authors", ["Unbekannt"])),
-                    "Cover": info.get("imageLinks", {}).get("thumbnail", ""),
-                    "Genre_Raw": info.get("categories", ["Roman"])[0]
-                }
-    except: return None
-    return None
-
-def search_open_library(query):
-    try:
-        clean_query = query.replace(" ", "+")
-        url = f"https://openlibrary.org/search.json?q={clean_query}&language=ger&limit=1"
-        headers = {"User-Agent": "MamasBuecherweltApp/1.0"}
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            data = response.json()
-            if data.get("numFound", 0) > 0 and len(data.get("docs", [])) > 0:
-                item = data["docs"][0]
-                cover = f"https://covers.openlibrary.org/b/id/{item.get('cover_i')}-M.jpg" if item.get("cover_i") else ""
-                autor = item.get("author_name")[0] if item.get("author_name") else "Unbekannt"
-                genre = item.get("subject")[0] if item.get("subject") else "Roman"
-                return {"Titel": item.get("title", query), "Autor": autor, "Cover": cover, "Genre_Raw": genre}
-    except: return None
-    return None
+                
+                # 1. Cover holen
+                cover = info.get("imageLinks", {}).get("thumbnail", "")
+                
+                # 2. Genre versuchen zu holen & zu übersetzen
+                raw_genre = info.get("categories", ["Roman"])[0]
+                genre = process_genre(raw_genre)
+                
+        return cover, genre
+    except:
+        return "", "Roman"
 
 def process_genre(raw_genre):
+    """Übersetzt Genres sauber"""
     if not raw_genre: return "Roman"
     if raw_genre in ["Roman", "Fiction", "Novel", "General", "Stories"]: return "Roman"
     if "Fantasy" in raw_genre: return "Fantasy"
@@ -107,29 +107,8 @@ def process_genre(raw_genre):
         return translated
     except: return "Roman"
 
-def search_initial(user_query):
-    result = search_google_books(user_query)
-    if not result:
-        result = search_open_library(user_query)
-    if not result:
-        return {"Titel": user_query, "Autor": "", "Genre": "Roman", "Cover": "", "Genre_Raw": "Roman"}
-    result["Genre"] = process_genre(result.get("Genre_Raw", "Roman"))
-    return result
-
-def check_cover_update(titel, autor):
-    try:
-        query = f"{titel} {autor}"
-        url = f"https://www.googleapis.com/books/v1/volumes?q={query}&maxResults=1"
-        response = requests.get(url)
-        if response.status_code == 200:
-            data = response.json()
-            if "items" in data:
-                return data["items"][0]["volumeInfo"].get("imageLinks", {}).get("thumbnail", "")
-    except: return ""
-    return ""
-
 def get_lastname(full_name):
-    """Hilfsfunktion: Holt das letzte Wort als Nachnamen"""
+    """Hilfsfunktion: Holt das letzte Wort als Nachnamen für die Sortierung"""
     if not isinstance(full_name, str) or not full_name.strip():
         return ""
     return full_name.strip().split(" ")[-1]
@@ -137,11 +116,6 @@ def get_lastname(full_name):
 # --- HAUPTPROGRAMM ---
 def main():
     st.title("📚 Mamas Bücherwelt")
-
-    if "draft_book" not in st.session_state:
-        st.session_state.draft_book = None
-    if "search_step" not in st.session_state:
-        st.session_state.search_step = 1 
 
     with st.sidebar:
         st.header("Einstellungen")
@@ -154,6 +128,7 @@ def main():
         sh = client.open(sheet_name)
         worksheet = sh.sheet1
         
+        # Daten laden
         data = worksheet.get_all_records()
         df = pd.DataFrame()
         existing_authors = []
@@ -170,86 +145,71 @@ def main():
                 if col not in df.columns: df[col] = "" if col != "Bewertung" else 0
             
             if "Autor" in df.columns:
+                # Autorenliste bereinigen und sortieren
                 existing_authors = sorted(list(set([a for a in df["Autor"].astype(str).tolist() if a.strip()])))
 
         tab1, tab2, tab3 = st.tabs(["📖 Neues Buch", "🔍 Meine Liste", "📊 Statistik"])
         
-        # --- TAB 1: EINGABE (WIZARD) ---
+        # --- TAB 1: EINGABE (SIMPEL & MANUELL) ---
         with tab1:
-            if st.session_state.search_step == 1:
-                st.header("1. Welches Buch?")
-                with st.form("search_form"):
-                    col_search, col_btn = st.columns([3, 1])
-                    with col_search:
-                        search_query = st.text_input("Titel:", placeholder="z.B. Leon & Luise", label_visibility="collapsed")
-                    with col_btn:
-                        submitted_search = st.form_submit_button("🔍 Suchen")
+            st.header("Neues Buch eintragen")
+            
+            # WICHTIG: Wir nutzen KEIN st.form um die Eingabefelder herum,
+            # damit das "Neuer Autor"-Feld sofort auftaucht, wenn man es auswählt.
+            
+            # 1. Titel
+            title_input = st.text_input("Buchtitel:", placeholder="z.B. Die unendliche Geschichte")
+            
+            # 2. Autor Auswahl
+            select_options = ["(Bitte wählen...)"] + existing_authors + ["➕ Neuer Autor hinzufügen"]
+            author_choice = st.selectbox("Autor:", options=select_options)
+            
+            # Logik für den Autoren-Namen
+            final_author_name = ""
+            
+            # 3. Autor manuell (erscheint nur bei Bedarf)
+            if author_choice == "➕ Neuer Autor hinzufügen":
+                final_author_name = st.text_input("Neuen Autorennamen eingeben:", placeholder="Vorname Nachname")
+            elif author_choice != "(Bitte wählen...)":
+                final_author_name = author_choice
 
-                if submitted_search and search_query:
-                    with st.spinner("Suche..."):
-                        result = search_initial(search_query)
-                        st.session_state.draft_book = result
-                        st.session_state.search_step = 2
-                        st.rerun()
-
-            elif st.session_state.search_step == 2 and st.session_state.draft_book:
-                draft = st.session_state.draft_book
-                
-                if st.button("⬅️ Zurück / Anderes Buch", type="secondary"):
-                    st.session_state.search_step = 1
-                    st.session_state.draft_book = None
-                    st.rerun()
-
-                st.markdown("---")
-                st.header("2. Daten prüfen & ergänzen")
-                
-                final_title = st.text_input("Titel:", value=draft["Titel"])
-                
-                found_author = draft["Autor"]
-                select_options = ["➕ Neuer Autor / Manuelle Eingabe"] + existing_authors
-                default_index = 0
-                if found_author in existing_authors:
-                    default_index = select_options.index(found_author)
-                
-                selected_option = st.selectbox("Autor auswählen:", options=select_options, index=default_index)
-                
-                if selected_option == "➕ Neuer Autor / Manuelle Eingabe":
-                    final_author = st.text_input("Autor eintippen:", value=found_author)
+            # 4. Bewertung
+            rating = st.slider("Bewertung:", 1, 5, 5)
+            
+            st.write("") # Abstand
+            
+            # SPEICHER-BUTTON
+            if st.button("💾 Buch speichern", type="primary"):
+                # Validierung
+                if not title_input:
+                    st.error("Bitte gib einen Titel ein!")
+                elif not final_author_name:
+                    st.error("Bitte wähle einen Autor oder gib einen neuen ein!")
                 else:
-                    final_author = selected_option
-                    st.caption(f"Autor '{final_author}' übernommen.")
-
-                final_rating = st.slider("Bewertung:", 1, 5, 5)
-                
-                save_btn = st.button("💾 Speichern & Fertig", type="primary")
-                
-                if save_btn:
-                    final_cover = draft["Cover"]
-                    if final_author != draft["Autor"] and final_author.strip() != "":
-                        with st.spinner("Suche Cover..."):
-                            new_cover = check_cover_update(final_title, final_author)
-                            if new_cover: final_cover = new_cover
-
-                    worksheet.append_row([
-                        final_title,
-                        final_author,
-                        draft["Genre"], 
-                        final_rating,
-                        final_cover
-                    ])
+                    # Alles okay -> Speichern!
+                    with st.spinner("Speichere... (Suche Cover im Hintergrund)"):
+                        # Cover & Genre holen wir uns automatisch
+                        found_cover, found_genre = fetch_background_info(title_input, final_author_name)
+                        
+                        worksheet.append_row([
+                            title_input,        # Dein Titel (Exakt!)
+                            final_author_name,  # Dein Autor (Exakt!)
+                            found_genre,        # Genre (Automatisch)
+                            rating,
+                            found_cover         # Cover (Automatisch)
+                        ])
                     
-                    st.success(f"Gespeichert: {final_title}")
+                    st.success(f"Gespeichert: {title_input}")
+                    
                     if show_animation:
                         st.balloons()
                         time.sleep(1.5)
                     else:
                         time.sleep(1)
                     
-                    st.session_state.draft_book = None
-                    st.session_state.search_step = 1
                     st.rerun()
 
-        # --- TAB 2: LISTE (MIT NACHNAMEN-SORTIERUNG) ---
+        # --- TAB 2: LISTE ---
         with tab2:
             st.header("Deine Sammlung")
             
@@ -261,10 +221,9 @@ def main():
                 with col_search:
                     search_filter = st.text_input("🔍 Liste durchsuchen:", placeholder="Titel oder Autor...")
                 with col_sort:
-                    # "Autor (A-Z)" ist jetzt standardmäßig ausgewählt
                     sort_option = st.selectbox("Sortieren:", 
                                                ["Autor (A-Z)", "Titel (A-Z)", "Neueste zuerst", "Beste Bewertung"],
-                                               index=0) # Index 0 = Autor ist Standard
+                                               index=0)
                 
                 df_view = df.copy()
                 if search_filter:
@@ -273,9 +232,8 @@ def main():
                         df_view["Autor"].astype(str).str.contains(search_filter, case=False)
                     ]
                 
-                # --- SORTIER-LOGIK ---
+                # Sortier-Logik (Nachname)
                 if sort_option == "Autor (A-Z)":
-                    # Wir erstellen temporär eine Nachnamen-Spalte für die Sortierung
                     df_view["_Nachname"] = df_view["Autor"].apply(get_lastname)
                     df_view = df_view.sort_values(by="_Nachname")
                 elif sort_option == "Titel (A-Z)":
@@ -287,25 +245,16 @@ def main():
 
                 st.write(f"Zeige {len(df_view)} Bücher:")
                 
+                # LISTE IM FORMULAR (damit es nicht flackert beim Anhaken)
                 with st.form("list_form"):
-                    # WICHTIG: Die temporäre Spalte "_Nachname" zeigen wir NICHT an.
-                    # Wir nehmen nur die originalen Spalten + Löschen.
                     cols = ["Titel", "Autor", "Genre", "Bewertung", "Cover", "Löschen"]
                     
                     edited_df = st.data_editor(
                         df_view,
                         column_order=cols,
                         column_config={
-                            "Löschen": st.column_config.CheckboxColumn(
-                                "Weg?",
-                                help="Haken setzen zum Löschen",
-                                default=False,
-                                width="small"
-                            ),
-                            "Cover": st.column_config.ImageColumn(
-                                "Bild", 
-                                width="small"
-                            ),
+                            "Löschen": st.column_config.CheckboxColumn("Weg?", default=False, width="small"),
+                            "Cover": st.column_config.ImageColumn("Bild", width="small"),
                             "Titel": st.column_config.TextColumn("Titel", width="medium", disabled=True),
                             "Autor": st.column_config.TextColumn("Autor", width="medium", disabled=True),
                             "Genre": st.column_config.TextColumn("Genre", width="small", disabled=True),
@@ -320,7 +269,6 @@ def main():
                     
                     if delete_btn:
                         rows_to_delete = edited_df[edited_df["Löschen"] == True]
-                        
                         if not rows_to_delete.empty:
                             with st.spinner(f"Lösche {len(rows_to_delete)} Buch/Bücher..."):
                                 for index, row in rows_to_delete.iterrows():
