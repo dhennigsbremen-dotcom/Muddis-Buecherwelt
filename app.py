@@ -84,16 +84,12 @@ def setup_sheets(client):
         ws_authors.update_cell(1, 1, "Name")
     return ws_books, ws_authors
 
-# --- DATEN LADEN (Manuelles Caching) ---
 def fetch_data_from_sheet(worksheet):
-    """Liest Daten direkt von Google und baut DataFrame"""
     try:
         all_values = worksheet.get_all_values()
         if len(all_values) < 2: return pd.DataFrame()
         
         headers = [str(h).strip().lower() for h in all_values[0]]
-        
-        # Mapping erstellen
         col_map = {}
         for idx, h in enumerate(headers):
             if "titel" in h: col_map["Titel"] = idx
@@ -105,42 +101,28 @@ def fetch_data_from_sheet(worksheet):
 
         rows = []
         for raw_row in all_values[1:]:
-            entry = {
-                "Titel": "", "Autor": "", "Cover": "", 
-                "Bewertung": "", "Genre": "", "Name": ""
-            }
-            # Werte zuweisen
+            entry = {"Titel": "", "Autor": "", "Cover": "", "Bewertung": "", "Genre": "", "Name": ""}
             for key, idx in col_map.items():
                 if idx < len(raw_row):
                     entry[key] = raw_row[idx]
-            
-            # Nur volle Zeilen (entweder Buch oder Autor)
             if entry["Titel"] or entry["Name"]:
                 rows.append(entry)
-                
         return pd.DataFrame(rows)
     except Exception as e:
-        st.error(f"Fehler beim Laden: {e}")
         return pd.DataFrame()
 
 def force_reload():
-    """Löscht den Speicher und zwingt zum Neuladen"""
     if "df_books" in st.session_state: del st.session_state.df_books
     if "df_authors" in st.session_state: del st.session_state.df_authors
     st.rerun()
 
 def sync_authors(ws_books, ws_authors):
     if "sync_done" in st.session_state: return 0
-    
-    # Wir nutzen hier die DataFrames aus dem State, falls vorhanden, sonst laden
-    if "df_books" not in st.session_state:
-        st.session_state.df_books = fetch_data_from_sheet(ws_books)
-    if "df_authors" not in st.session_state:
-        st.session_state.df_authors = fetch_data_from_sheet(ws_authors)
+    if "df_books" not in st.session_state: st.session_state.df_books = fetch_data_from_sheet(ws_books)
+    if "df_authors" not in st.session_state: st.session_state.df_authors = fetch_data_from_sheet(ws_authors)
         
     df_b = st.session_state.df_books
     df_a = st.session_state.df_authors
-    
     if df_b.empty: return 0
     
     book_authors = set([a.strip() for a in df_b["Autor"].tolist() if a.strip()])
@@ -153,10 +135,8 @@ def sync_authors(ws_books, ws_authors):
         rows_to_add = [[name] for name in missing]
         ws_authors.append_rows(rows_to_add)
         st.session_state.sync_done = True
-        # Cache invalidieren
         del st.session_state.df_authors
         return len(missing)
-    
     st.session_state.sync_done = True
     return 0
 
@@ -172,12 +152,37 @@ def process_genre(raw_genre):
         return translated
     except: return "Roman"
 
+# --- OPEN LIBRARY SUCHE (DER JOKER) ---
+def search_open_library_cover(titel, autor):
+    try:
+        # OpenLibrary mag "Titel Autor" als Suchstring
+        query = f"{titel} {autor}".replace(" ", "+")
+        url = f"https://openlibrary.org/search.json?q={query}&limit=1"
+        # Header wichtig, damit wir nicht geblockt werden
+        headers = {"User-Agent": "MamasBuecherweltApp/1.0"}
+        response = requests.get(url, headers=headers, timeout=5)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("numFound", 0) > 0 and len(data.get("docs", [])) > 0:
+                item = data["docs"][0]
+                # Cover ID holen
+                if item.get("cover_i"):
+                    return f"https://covers.openlibrary.org/b/id/{item.get('cover_i')}-M.jpg"
+    except:
+        return ""
+    return ""
+
+# --- HYBRID SUCHE (Google + OpenLibrary) ---
 def fetch_book_data_background(titel, autor):
+    cover = ""
+    genre = "Roman"
+    
+    # 1. Versuch: Google Books
     try:
         query = f"{titel} {autor}"
         url = f"https://www.googleapis.com/books/v1/volumes?q={query}&langRestrict=de&maxResults=1"
-        response = requests.get(url)
-        cover, genre = "", "Roman"
+        response = requests.get(url, timeout=5)
         if response.status_code == 200:
             data = response.json()
             if "items" in data:
@@ -185,8 +190,18 @@ def fetch_book_data_background(titel, autor):
                 cover = info.get("imageLinks", {}).get("thumbnail", "")
                 raw_cat = info.get("categories", ["Roman"])[0]
                 genre = process_genre(raw_cat)
-        return cover, genre
-    except: return "", "Roman"
+    except: pass
+
+    # 2. Versuch: OpenLibrary (wenn Google kein Cover hatte)
+    if not cover:
+        try:
+            ol_cover = search_open_library_cover(titel, autor)
+            if ol_cover:
+                cover = ol_cover
+                # Genre lassen wir, wenn Google es schon gefunden hat, sonst bleibt es Roman
+        except: pass
+
+    return cover, genre
 
 def get_smart_author_name(short_name, all_authors):
     short_clean = short_name.strip().lower()
@@ -211,7 +226,6 @@ def main():
         if client is None: st.stop()
         ws_books, ws_authors = setup_sheets(client)
 
-        # 1. DATEN LADEN (Nur wenn nicht schon da)
         if "df_books" not in st.session_state:
             with st.spinner("Lade Bücherregal..."):
                 st.session_state.df_books = fetch_data_from_sheet(ws_books)
@@ -219,11 +233,9 @@ def main():
         if "df_authors" not in st.session_state:
             st.session_state.df_authors = fetch_data_from_sheet(ws_authors)
 
-        # 2. Sync
         added = sync_authors(ws_books, ws_authors)
         if added > 0: st.toast(f"✅ {added} Autoren synchronisiert!")
 
-        # Listen vorbereiten
         known_authors_list = []
         if not st.session_state.df_authors.empty:
             known_authors_list = [a for a in st.session_state.df_authors["Name"].tolist() if str(a).strip()]
@@ -245,13 +257,12 @@ def main():
                     autor_frag = parts[1].strip()
                     
                     if titel and autor_frag:
-                        with st.spinner("Speichere..."):
+                        with st.spinner("Speichere & suche Cover (Google + OpenLibrary)..."):
                             final_author = get_smart_author_name(autor_frag, known_authors_list)
                             c, g = fetch_book_data_background(titel, final_author)
                             
                             ws_books.append_row([titel, final_author, g, rating, c])
                             
-                            # Cache löschen erzwingt Neuladen beim nächsten Mal
                             del st.session_state.df_books
                         
                         st.success(f"Gespeichert: {titel}")
@@ -266,7 +277,6 @@ def main():
         with tab2:
             st.header("Autoren")
             
-            # Zähler berechnen
             df_b = st.session_state.df_books
             df_a = st.session_state.df_authors.copy()
             
@@ -303,7 +313,6 @@ def main():
             c_head, c_btn = st.columns([2,1])
             with c_head: st.header("Sammlung")
             with c_btn: 
-                # HIER IST DER RETTUNGSKNOPF
                 if st.button("🔄 Tabelle neu laden"):
                     force_reload()
 
@@ -354,13 +363,13 @@ def main():
 
                 st.markdown("---")
                 
-                with st.expander("🔧 Wartung"):
+                with st.expander("🔧 Wartung & fehlende Cover"):
+                    st.write("Sucht in Google & OpenLibrary nach Bildern.")
                     if st.button("🔄 Fehlende Bilder suchen"):
-                        with st.status("Suche...", expanded=True):
+                        with st.status("Durchsuche beide Datenbanken... (Geduld bitte!)", expanded=True) as status:
                             all_vals = ws_books.get_all_values()
                             headers = [str(h).lower() for h in all_vals[0]]
                             
-                            # Einfache Index-Suche
                             idx_t = -1; idx_a = -1; idx_c = -1; idx_g = -1
                             for i, h in enumerate(headers):
                                 if "titel" in h: idx_t = i
@@ -368,28 +377,31 @@ def main():
                                 if h in ["cover", "bild"]: idx_c = i
                                 if "genre" in h: idx_g = i
                             
+                            updates = 0
                             if idx_t >= 0 and idx_c >= 0:
-                                updates = 0
                                 for i, row in enumerate(all_vals[1:], start=2):
                                     cov = row[idx_c] if len(row) > idx_c else ""
                                     if not cov:
                                         tit = row[idx_t] if len(row) > idx_t else ""
                                         aut = row[idx_a] if len(row) > idx_a else ""
                                         if tit:
+                                            st.write(f"Suche für: {tit}")
                                             nc, ng = fetch_book_data_background(tit, aut)
                                             if nc:
                                                 ws_books.update_cell(i, idx_c+1, nc)
                                                 updates += 1
-                                            time.sleep(1.5)
-                                if updates > 0:
-                                    del st.session_state.df_books
-                                    st.success(f"{updates} Bilder gefunden!")
-                                    st.rerun()
-                            else:
-                                st.error("Konnte Spalten nicht zuordnen.")
+                                            time.sleep(1.0) # Kurze Pause
 
+                            status.update(label="Fertig!", state="complete", expanded=False)
+                        
+                        if updates > 0:
+                            del st.session_state.df_books
+                            st.success(f"{updates} Bilder gefunden!")
+                            st.rerun()
+                        else:
+                            st.info("Nichts Neues gefunden (oder Datenbanken haben keine Bilder).")
             else:
-                st.info("Liste leer (oder lade Daten...). Drücke oben rechts auf 'Neu laden'.")
+                st.info("Liste leer. Drücke oben auf 'Tabelle neu laden'.")
 
     except Exception as e:
         st.error(f"Fehler: {e}")
