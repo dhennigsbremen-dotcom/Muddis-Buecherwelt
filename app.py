@@ -4,6 +4,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import requests
 import time
+from deep_translator import GoogleTranslator
 
 # --- KONFIGURATION ---
 st.set_page_config(page_title="Mamas Bibliothek", page_icon="📚", layout="centered")
@@ -92,45 +93,69 @@ def setup_sheets(client):
     return ws_books, ws_authors
 
 def sync_authors(ws_books, ws_authors):
-    # 1. Alle Bücher holen
     books_data = ws_books.get_all_records()
     if not books_data: return 0
     
-    # Autoren extrahieren
     book_authors = set()
     for row in books_data:
         if "Autor" in row and str(row["Autor"]).strip():
             book_authors.add(str(row["Autor"]).strip())
             
-    # 2. Bestehende Autoren holen
     auth_data = ws_authors.get_all_records()
     existing_authors = set()
     for row in auth_data:
         if "Name" in row and str(row["Name"]).strip():
             existing_authors.add(str(row["Name"]).strip())
             
-    # 3. Abgleich
     missing = list(book_authors - existing_authors)
     missing.sort()
     
-    # 4. Nachtragen
     if missing:
         rows_to_add = [[name] for name in missing]
         ws_authors.append_rows(rows_to_add)
         return len(missing)
     return 0
 
-def fetch_cover_background(titel, autor):
+def process_genre(raw_genre):
+    """Verhindert 'römisch' und übersetzt sauber"""
+    if not raw_genre: return "Roman"
+    if raw_genre in ["Roman", "Fiction", "Novel", "General", "Stories"]: return "Roman"
+    if "Fantasy" in raw_genre: return "Fantasy"
+    if "Thriller" in raw_genre or "Crime" in raw_genre: return "Krimi"
+    
+    try:
+        translator = GoogleTranslator(source='auto', target='de')
+        translated = translator.translate(raw_genre)
+        if "römisch" in translated.lower(): return "Roman"
+        return translated
+    except: return "Roman"
+
+def fetch_book_data_background(titel, autor):
+    """
+    Sucht Cover UND Genre im Hintergrund.
+    Gibt (Cover-URL, Genre) zurück.
+    """
     try:
         query = f"{titel} {autor}"
         url = f"https://www.googleapis.com/books/v1/volumes?q={query}&langRestrict=de&maxResults=1"
         response = requests.get(url)
+        
+        cover = ""
+        genre = "Roman" # Fallback
+        
         if response.status_code == 200:
             data = response.json()
             if "items" in data:
-                return data["items"][0]["volumeInfo"].get("imageLinks", {}).get("thumbnail", "")
-    except: return ""
-    return ""
+                info = data["items"][0]["volumeInfo"]
+                # Cover
+                cover = info.get("imageLinks", {}).get("thumbnail", "")
+                # Genre
+                raw_cat = info.get("categories", ["Roman"])[0]
+                genre = process_genre(raw_cat)
+                
+        return cover, genre
+    except:
+        return "", "Roman"
 
 def get_smart_author_name(short_name, all_authors):
     short_clean = short_name.strip().lower()
@@ -141,17 +166,14 @@ def get_smart_author_name(short_name, all_authors):
     return short_name 
 
 def get_lastname(full_name):
-    """Hilfsfunktion für die Sortierung"""
     if not isinstance(full_name, str) or not full_name.strip():
         return ""
-    # Wir nehmen an, das letzte Wort ist der Nachname
     return full_name.strip().split(" ")[-1].lower()
 
 # --- HAUPTPROGRAMM ---
 def main():
     st.title("📚 Mamas Bücherwelt")
 
-    # Initialisierung für das Leeren des Eingabefeldes
     if "input_key" not in st.session_state:
         st.session_state.input_key = 0
 
@@ -159,21 +181,17 @@ def main():
         client = get_connection()
         if client is None: st.stop()
         
-        # 1. Verbindung & Auto-Sync
         ws_books, ws_authors = setup_sheets(client)
         added_count = sync_authors(ws_books, ws_authors)
         if added_count > 0:
             st.toast(f"✅ {added_count} Autoren synchronisiert!", icon="🧙‍♀️")
 
-        # 2. Daten laden
         data_authors = ws_authors.get_all_records()
         df_authors = pd.DataFrame(data_authors)
-        
         known_authors_list = []
         if not df_authors.empty and "Name" in df_authors.columns:
             known_authors_list = [a for a in df_authors["Name"].tolist() if str(a).strip()]
 
-        # Tabs
         tab1, tab2, tab3 = st.tabs(["✍️ Neu", "👥 Autoren", "🔍 Liste"])
         
         # --- TAB 1: EINGABE ---
@@ -181,8 +199,6 @@ def main():
             st.header("Buch eintragen")
             st.markdown('<div class="small-hint">Eingeben: Titel, Autor<br>(das Komma ist wichtig!!!)</div>', unsafe_allow_html=True)
             
-            # WICHTIG: Wir nutzen einen dynamischen Key, um das Feld leeren zu können
-            # Wenn wir den Key ändern, "vergisst" Streamlit den alten Inhalt.
             raw_input = st.text_input(
                 "Eingabe:", 
                 placeholder="Titel, Autor", 
@@ -198,26 +214,25 @@ def main():
                     autor_fragment = parts[1].strip()
                     
                     if titel_raw and autor_fragment:
-                        with st.spinner("..."):
+                        with st.spinner("Speichere & suche Infos im Hintergrund..."):
+                            # Smart Author
                             final_author = get_smart_author_name(autor_fragment, known_authors_list)
-                            cover_url = fetch_cover_background(titel_raw, final_author)
+                            # Cover & Genre holen
+                            fetched_cover, fetched_genre = fetch_book_data_background(titel_raw, final_author)
                             
                             ws_books.append_row([
                                 titel_raw,
                                 final_author,
-                                "Roman", 
+                                fetched_genre, 
                                 rating,
-                                cover_url
+                                fetched_cover
                             ])
                         
-                        st.success(f"Gespeichert!\n{titel_raw} ({final_author})")
+                        st.success(f"Gespeichert!\n{titel_raw}\n({fetched_genre})")
                         if final_author != autor_fragment:
-                            st.caption(f"Autor vervollständigt zu: {final_author}")
+                            st.caption(f"Autor vervollständigt: {final_author}")
                         
-                        # BALLONS SIND ZURÜCK! 🎈
                         st.balloons()
-                        
-                        # FELD LEEREN: Wir erhöhen den Key, dadurch wird ein "neues" leeres Feld erzeugt
                         st.session_state.input_key += 1
                         time.sleep(1.5)
                         st.rerun()
@@ -229,17 +244,14 @@ def main():
         # --- TAB 2: AUTOREN ---
         with tab2:
             st.header("Autoren-Liste")
-            
             data_books_for_count = ws_books.get_all_records()
             df_books_count = pd.DataFrame(data_books_for_count)
-            
             author_counts = {}
             if not df_books_count.empty and "Autor" in df_books_count.columns:
                 author_counts = df_books_count["Autor"].value_counts().to_dict()
 
             if df_authors.empty:
                 df_authors = pd.DataFrame({"Name": [""]})
-
             df_authors["Anzahl Bücher"] = df_authors["Name"].map(author_counts).fillna(0).astype(int)
 
             edited_authors = st.data_editor(
@@ -247,8 +259,8 @@ def main():
                 num_rows="dynamic",
                 use_container_width=True,
                 column_config={
-                    "Name": st.column_config.TextColumn("Name (Vollständig)", required=True),
-                    "Anzahl Bücher": st.column_config.NumberColumn("Bücher", disabled=True)
+                    "Name": st.column_config.TextColumn("Name", required=True),
+                    "Anzahl Bücher": st.column_config.NumberColumn("Anzahl", disabled=True)
                 },
                 hide_index=True
             )
@@ -256,12 +268,10 @@ def main():
             if st.button("👥 Liste aktualisieren"):
                 clean_data = edited_authors[edited_authors["Name"].astype(str).str.strip() != ""]
                 df_to_save = clean_data[["Name"]]
-                
                 ws_authors.clear()
                 ws_authors.update_cell(1, 1, "Name")
                 if not df_to_save.empty:
                     ws_authors.update([df_to_save.columns.values.tolist()] + df_to_save.values.tolist())
-                
                 st.success("Gespeichert!")
                 time.sleep(1)
                 st.rerun()
@@ -274,7 +284,7 @@ def main():
             df_books = pd.DataFrame()
             if data_books:
                 df_books = pd.DataFrame(data_books)
-                for c in ["Titel", "Autor", "Bewertung", "Cover"]: 
+                for c in ["Titel", "Autor", "Bewertung", "Cover", "Genre"]: 
                     if c not in df_books.columns: df_books[c] = ""
             
             if not df_books.empty:
@@ -282,11 +292,8 @@ def main():
                 
                 search = st.text_input("🔍 Suchen:", placeholder="Titel...", label_visibility="collapsed")
                 
-                # --- SORTIER-LOGIK ---
-                # Wir berechnen IMMER den Nachnamen für die Sortierung
+                # --- SORTIERUNG: IMMER NACH NACHNAME ---
                 df_books["_Nachname"] = df_books["Autor"].apply(get_lastname)
-                
-                # Standardmäßig nach Nachnamen sortiert (A-Z)
                 df_view = df_books.sort_values(by="_Nachname")
                 
                 if search:
@@ -295,12 +302,11 @@ def main():
                         df_view["Autor"].astype(str).str.contains(search, case=False)
                     ]
                 
-                # Formular für die Tabelle
                 with st.form("list_view"):
-                    # REIHENFOLGE GEÄNDERT: Löschen ist jetzt ganz rechts (letzte Stelle)
+                    # SPALTEN: Löschen links, Bild dabei
                     edited_df = st.data_editor(
                         df_view,
-                        column_order=["Titel", "Autor", "Bewertung", "Cover", "Löschen"],
+                        column_order=["Löschen", "Titel", "Autor", "Bewertung", "Cover"],
                         column_config={
                             "Löschen": st.column_config.CheckboxColumn("Weg?", width="small", default=False),
                             "Cover": st.column_config.ImageColumn("Img", width="small"),
@@ -323,6 +329,63 @@ def main():
                             st.success("Gelöscht!")
                             time.sleep(1)
                             st.rerun()
+
+                st.markdown("---")
+                
+                # --- REPARATUR-BEREICH FÜR ALTE BÜCHER ---
+                with st.expander("🔧 Wartung & fehlende Cover"):
+                    st.write("Klicke hier, wenn Bücher kein Bild haben. Das Programm sucht sie dann nachträglich.")
+                    if st.button("🔄 Fehlende Bilder & Genres nachtragen"):
+                        updates_made = 0
+                        with st.status("Durchsuche Bibliothek...", expanded=True) as status:
+                            # Wir iterieren durch ALLE Bücher in der Original-DB (nicht im View)
+                            # GSpread ist 1-basiert. Header ist Zeile 1. Daten ab Zeile 2.
+                            all_values = ws_books.get_all_values()
+                            # Header: Titel(0), Autor(1), Genre(2), Sterne(3), Cover(4) -> check indices!
+                            headers = all_values[0]
+                            
+                            # Indices finden
+                            try:
+                                idx_titel = headers.index("Titel")
+                                idx_autor = headers.index("Autor")
+                                idx_cover = headers.index("Cover")
+                                idx_genre = headers.index("Genre")
+                            except:
+                                st.error("Spaltenstruktur passt nicht. Bitte 'Titel', 'Autor', 'Cover', 'Genre' prüfen.")
+                                st.stop()
+
+                            for i, row in enumerate(all_values[1:], start=2): # Start bei Zeile 2
+                                current_cover = row[idx_cover] if len(row) > idx_cover else ""
+                                current_genre = row[idx_genre] if len(row) > idx_genre else ""
+                                
+                                # Wenn Cover leer ist -> Suchen!
+                                if not current_cover:
+                                    titel = row[idx_titel]
+                                    autor = row[idx_autor]
+                                    
+                                    st.write(f"Suche Infos für: {titel}...")
+                                    new_cover, new_genre = fetch_book_data_background(titel, autor)
+                                    
+                                    if new_cover:
+                                        # Update Cover (Spalte ist idx_cover + 1 wegen 1-based indexing)
+                                        ws_books.update_cell(i, idx_cover + 1, new_cover)
+                                        updates_made += 1
+                                    
+                                    # Update Genre falls leer oder "Roman" (wir versuchen es genauer)
+                                    if (not current_genre or current_genre == "Roman") and new_genre != "Roman":
+                                        ws_books.update_cell(i, idx_genre + 1, new_genre)
+                                    
+                                    time.sleep(1.0) # Pause gegen Google Sperre
+
+                            status.update(label="Fertig!", state="complete", expanded=False)
+                        
+                        if updates_made > 0:
+                            st.success(f"{updates_made} Cover nachgetragen!")
+                            time.sleep(2)
+                            st.rerun()
+                        else:
+                            st.info("Alle Bücher haben bereits Bilder (oder Google hat nichts gefunden).")
+
             else:
                 st.info("Leer.")
 
