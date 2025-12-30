@@ -117,7 +117,6 @@ def sync_authors(ws_books, ws_authors):
     return 0
 
 def process_genre(raw_genre):
-    """Verhindert 'römisch' und übersetzt sauber"""
     if not raw_genre: return "Roman"
     if raw_genre in ["Roman", "Fiction", "Novel", "General", "Stories"]: return "Roman"
     if "Fantasy" in raw_genre: return "Fantasy"
@@ -131,25 +130,19 @@ def process_genre(raw_genre):
     except: return "Roman"
 
 def fetch_book_data_background(titel, autor):
-    """
-    Sucht Cover UND Genre im Hintergrund.
-    Gibt (Cover-URL, Genre) zurück.
-    """
     try:
         query = f"{titel} {autor}"
         url = f"https://www.googleapis.com/books/v1/volumes?q={query}&langRestrict=de&maxResults=1"
         response = requests.get(url)
         
         cover = ""
-        genre = "Roman" # Fallback
+        genre = "Roman"
         
         if response.status_code == 200:
             data = response.json()
             if "items" in data:
                 info = data["items"][0]["volumeInfo"]
-                # Cover
                 cover = info.get("imageLinks", {}).get("thumbnail", "")
-                # Genre
                 raw_cat = info.get("categories", ["Roman"])[0]
                 genre = process_genre(raw_cat)
                 
@@ -169,6 +162,13 @@ def get_lastname(full_name):
     if not isinstance(full_name, str) or not full_name.strip():
         return ""
     return full_name.strip().split(" ")[-1].lower()
+
+def get_col_index(headers, possible_names):
+    """Hilfsfunktion: Sucht flexibel nach Spaltennamen"""
+    for name in possible_names:
+        if name in headers:
+            return headers.index(name)
+    return -1
 
 # --- HAUPTPROGRAMM ---
 def main():
@@ -214,10 +214,8 @@ def main():
                     autor_fragment = parts[1].strip()
                     
                     if titel_raw and autor_fragment:
-                        with st.spinner("Speichere & suche Infos im Hintergrund..."):
-                            # Smart Author
+                        with st.spinner("Speichere & suche Infos..."):
                             final_author = get_smart_author_name(autor_fragment, known_authors_list)
-                            # Cover & Genre holen
                             fetched_cover, fetched_genre = fetch_book_data_background(titel_raw, final_author)
                             
                             ws_books.append_row([
@@ -228,9 +226,8 @@ def main():
                                 fetched_cover
                             ])
                         
-                        st.success(f"Gespeichert!\n{titel_raw}\n({fetched_genre})")
-                        if final_author != autor_fragment:
-                            st.caption(f"Autor vervollständigt: {final_author}")
+                        st.success(f"Gespeichert!\n{titel_raw}")
+                        st.caption(f"Autor: {final_author}")
                         
                         st.balloons()
                         st.session_state.input_key += 1
@@ -284,6 +281,12 @@ def main():
             df_books = pd.DataFrame()
             if data_books:
                 df_books = pd.DataFrame(data_books)
+                rename_map = {}
+                # Umbenennung falls alte Spaltennamen existieren
+                if "Bild" in df_books.columns: rename_map["Bild"] = "Cover"
+                if "Sterne" in df_books.columns: rename_map["Sterne"] = "Bewertung"
+                if rename_map: df_books = df_books.rename(columns=rename_map)
+
                 for c in ["Titel", "Autor", "Bewertung", "Cover", "Genre"]: 
                     if c not in df_books.columns: df_books[c] = ""
             
@@ -292,7 +295,7 @@ def main():
                 
                 search = st.text_input("🔍 Suchen:", placeholder="Titel...", label_visibility="collapsed")
                 
-                # --- SORTIERUNG: IMMER NACH NACHNAME ---
+                # Sortierung: Nachname
                 df_books["_Nachname"] = df_books["Autor"].apply(get_lastname)
                 df_view = df_books.sort_values(by="_Nachname")
                 
@@ -303,10 +306,10 @@ def main():
                     ]
                 
                 with st.form("list_view"):
-                    # SPALTEN: Löschen links, Bild dabei
+                    # HIER: Löschen ("Weg?") wieder ganz RECHTS
                     edited_df = st.data_editor(
                         df_view,
-                        column_order=["Löschen", "Titel", "Autor", "Bewertung", "Cover"],
+                        column_order=["Titel", "Autor", "Bewertung", "Cover", "Löschen"],
                         column_config={
                             "Löschen": st.column_config.CheckboxColumn("Weg?", width="small", default=False),
                             "Cover": st.column_config.ImageColumn("Img", width="small"),
@@ -332,59 +335,55 @@ def main():
 
                 st.markdown("---")
                 
-                # --- REPARATUR-BEREICH FÜR ALTE BÜCHER ---
+                # --- REPARATUR-BEREICH ---
                 with st.expander("🔧 Wartung & fehlende Cover"):
-                    st.write("Klicke hier, wenn Bücher kein Bild haben. Das Programm sucht sie dann nachträglich.")
-                    if st.button("🔄 Fehlende Bilder & Genres nachtragen"):
+                    st.write("Sucht nachträglich nach Bildern für Bücher, die noch keins haben.")
+                    if st.button("🔄 Fehlende Bilder suchen"):
                         updates_made = 0
-                        with st.status("Durchsuche Bibliothek...", expanded=True) as status:
-                            # Wir iterieren durch ALLE Bücher in der Original-DB (nicht im View)
-                            # GSpread ist 1-basiert. Header ist Zeile 1. Daten ab Zeile 2.
+                        with st.status("Arbeite...", expanded=True) as status:
                             all_values = ws_books.get_all_values()
-                            # Header: Titel(0), Autor(1), Genre(2), Sterne(3), Cover(4) -> check indices!
                             headers = all_values[0]
                             
-                            # Indices finden
-                            try:
-                                idx_titel = headers.index("Titel")
-                                idx_autor = headers.index("Autor")
-                                idx_cover = headers.index("Cover")
-                                idx_genre = headers.index("Genre")
-                            except:
-                                st.error("Spaltenstruktur passt nicht. Bitte 'Titel', 'Autor', 'Cover', 'Genre' prüfen.")
+                            # Robuste Index-Suche (findet Cover ODER Bild)
+                            idx_titel = get_col_index(headers, ["Titel"])
+                            idx_autor = get_col_index(headers, ["Autor"])
+                            idx_cover = get_col_index(headers, ["Cover", "Bild", "Image"])
+                            idx_genre = get_col_index(headers, ["Genre", "Kategorie"])
+                            
+                            if idx_titel == -1 or idx_autor == -1 or idx_cover == -1:
+                                st.error("Konnte Spalten nicht finden. Bitte prüfen, ob 'Titel', 'Autor' und 'Cover' (oder 'Bild') in der Tabelle stehen.")
                                 st.stop()
 
-                            for i, row in enumerate(all_values[1:], start=2): # Start bei Zeile 2
+                            for i, row in enumerate(all_values[1:], start=2):
+                                # Sicherstellen, dass die Zeile lang genug ist
                                 current_cover = row[idx_cover] if len(row) > idx_cover else ""
-                                current_genre = row[idx_genre] if len(row) > idx_genre else ""
+                                current_genre = row[idx_genre] if (idx_genre != -1 and len(row) > idx_genre) else ""
                                 
-                                # Wenn Cover leer ist -> Suchen!
                                 if not current_cover:
                                     titel = row[idx_titel]
                                     autor = row[idx_autor]
                                     
-                                    st.write(f"Suche Infos für: {titel}...")
+                                    st.write(f"Suche: {titel}...")
                                     new_cover, new_genre = fetch_book_data_background(titel, autor)
                                     
                                     if new_cover:
-                                        # Update Cover (Spalte ist idx_cover + 1 wegen 1-based indexing)
                                         ws_books.update_cell(i, idx_cover + 1, new_cover)
                                         updates_made += 1
                                     
-                                    # Update Genre falls leer oder "Roman" (wir versuchen es genauer)
-                                    if (not current_genre or current_genre == "Roman") and new_genre != "Roman":
+                                    # Genre updaten wenn wir eh schon dabei sind
+                                    if idx_genre != -1 and (not current_genre or current_genre == "Roman") and new_genre != "Roman":
                                         ws_books.update_cell(i, idx_genre + 1, new_genre)
                                     
-                                    time.sleep(1.0) # Pause gegen Google Sperre
+                                    time.sleep(1.0) # Google Limit respektieren
 
                             status.update(label="Fertig!", state="complete", expanded=False)
                         
                         if updates_made > 0:
-                            st.success(f"{updates_made} Cover nachgetragen!")
+                            st.success(f"{updates_made} Bilder gefunden!")
                             time.sleep(2)
                             st.rerun()
                         else:
-                            st.info("Alle Bücher haben bereits Bilder (oder Google hat nichts gefunden).")
+                            st.info("Alles aktuell.")
 
             else:
                 st.info("Leer.")
