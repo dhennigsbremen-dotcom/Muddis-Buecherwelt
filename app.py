@@ -3,13 +3,12 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 import requests
-from deep_translator import GoogleTranslator
 import time
 
 # --- KONFIGURATION ---
 st.set_page_config(page_title="Mamas Bibliothek", page_icon="📚", layout="centered")
 
-# --- DESIGN (Optimiert für kleine Screens) ---
+# --- DESIGN (iPhone SE optimiert: GROSSE TABS) ---
 st.markdown("""
     <style>
     .stApp { background-color: #f5f5dc; }
@@ -22,26 +21,44 @@ st.markdown("""
         font-weight: bold !important;
         font-size: 18px !important;
         border-radius: 8px;
-        padding: 15px !important; /* Mehr Padding für Touch */
+        padding: 15px !important;
         border: none;
         width: 100%;
         margin-top: 10px;
     }
 
-    /* Tabs groß */
+    /* --- TAB DESIGN: GROSS & GETRENNT --- */
+    
+    /* Der Container für die Tabs: Abstand erzwingen */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px; /* Lücke zwischen den Tabs */
+    }
+
+    /* Der einzelne Tab (inaktiv) */
     .stTabs [data-baseweb="tab"] {
-        font-size: 1.2rem !important;
-        padding: 10px 5px !important;
+        height: 50px;
+        background-color: #eaddcf; /* Helles Beige */
+        border-radius: 8px; /* Abgerundet */
+        padding: 0px 10px !important;
+        font-size: 1.2rem !important; /* Große Schrift */
         font-weight: 700 !important;
         color: #4a3b2a;
+        border: 1px solid #d35400; /* Feiner Rand */
+        flex-grow: 1; /* Tabs füllen die ganze Breite aus */
+    }
+
+    /* Der AKTIVE Tab (ausgewählt) */
+    .stTabs [aria-selected="true"] {
+        background-color: #d35400 !important; /* Orange */
+        color: white !important; /* Weiße Schrift */
     }
     
     /* Eingabefelder */
     .stTextInput input {
         background-color: #fffaf0 !important;
-        border: 2px solid #d35400 !important; /* Dickerer Rand */
+        border: 2px solid #d35400 !important;
         color: #2c3e50 !important;
-        font-size: 16px !important; /* Größere Schrift zum Tippen */
+        font-size: 16px !important;
     }
     
     /* Hinweise */
@@ -70,21 +87,44 @@ def get_connection():
 def setup_sheets(client):
     """Sorgt dafür, dass beide Tabellenblätter existieren"""
     sh = client.open("Mamas Bücherliste")
-    
-    # 1. Bücherliste (Sheet1)
     ws_books = sh.sheet1
-    
-    # 2. Autorenliste (Checken ob existiert, sonst erstellen)
     try:
         ws_authors = sh.worksheet("Autoren")
     except:
         ws_authors = sh.add_worksheet(title="Autoren", rows=1000, cols=1)
-        ws_authors.update_cell(1, 1, "Name") # Header setzen
-        
+        ws_authors.update_cell(1, 1, "Name")
     return ws_books, ws_authors
 
+def sync_authors(ws_books, ws_authors):
+    # 1. Alle Bücher holen
+    books_data = ws_books.get_all_records()
+    if not books_data: return 0
+    
+    # Autoren aus Büchern extrahieren
+    book_authors = set()
+    for row in books_data:
+        if "Autor" in row and str(row["Autor"]).strip():
+            book_authors.add(str(row["Autor"]).strip())
+            
+    # 2. Bestehende Autorenliste holen
+    auth_data = ws_authors.get_all_records()
+    existing_authors = set()
+    for row in auth_data:
+        if "Name" in row and str(row["Name"]).strip():
+            existing_authors.add(str(row["Name"]).strip())
+            
+    # 3. Was fehlt?
+    missing = list(book_authors - existing_authors)
+    missing.sort()
+    
+    # 4. Nachtragen
+    if missing:
+        rows_to_add = [[name] for name in missing]
+        ws_authors.append_rows(rows_to_add)
+        return len(missing)
+    return 0
+
 def fetch_cover_background(titel, autor):
-    """Sucht Cover, ändert aber KEINEN Text"""
     try:
         query = f"{titel} {autor}"
         url = f"https://www.googleapis.com/books/v1/volumes?q={query}&langRestrict=de&maxResults=1"
@@ -97,19 +137,12 @@ def fetch_cover_background(titel, autor):
     return ""
 
 def get_smart_author_name(short_name, all_authors):
-    """
-    Der 'Twist': Prüft, ob 'Boyle' in 'Tom Coraghessan Boyle' steckt.
-    Gibt den langen Namen zurück, wenn gefunden.
-    """
     short_clean = short_name.strip().lower()
     if not short_clean: return short_name
-    
     for full_name in all_authors:
-        # Prüfen ob der eingegebene Schnipsel im vollen Namen steckt
         if short_clean in str(full_name).lower():
-            return full_name # Treffer! Wir nehmen den langen Namen
-            
-    return short_name # Kein Treffer, wir nehmen was getippt wurde
+            return full_name 
+    return short_name 
 
 # --- HAUPTPROGRAMM ---
 def main():
@@ -119,126 +152,115 @@ def main():
         client = get_connection()
         if client is None: st.stop()
         
-        # Beide Tabellen laden
+        # 1. Verbindung & Auto-Sync
         ws_books, ws_authors = setup_sheets(client)
-        
-        # Autorenliste laden (für den Smart-Check)
+        added_count = sync_authors(ws_books, ws_authors)
+        if added_count > 0:
+            st.toast(f"✅ {added_count} Autoren synchronisiert!", icon="🧙‍♀️")
+
+        # 2. Daten laden
         data_authors = ws_authors.get_all_records()
         df_authors = pd.DataFrame(data_authors)
         
-        # Liste aller bekannten Autoren extrahieren
         known_authors_list = []
         if not df_authors.empty and "Name" in df_authors.columns:
             known_authors_list = [a for a in df_authors["Name"].tolist() if str(a).strip()]
 
-        # Tabs
+        # Tabs (Jetzt im Kachel-Design)
         tab1, tab2, tab3 = st.tabs(["✍️ Neu", "👥 Autoren", "🔍 Liste"])
         
-        # --- TAB 1: SCHNELL-EINGABE (DAS KOMMA-FELD) ---
+        # --- TAB 1: EINGABE ---
         with tab1:
             st.header("Buch eintragen")
-            st.markdown('<div class="small-hint">Format: <b>Titel, Autor</b> (Komma ist wichtig!)</div>', unsafe_allow_html=True)
+            st.markdown('<div class="small-hint">Einfach tippen: <b>Titel, Autor</b></div>', unsafe_allow_html=True)
             
-            # Das EINE Feld
             raw_input = st.text_input("Eingabe:", placeholder="z.B. Amerika, Boyle")
-            
-            # Bewertung direkt drunter
             rating = st.slider("Sterne:", 1, 5, 5)
             
             if st.button("💾 Speichern"):
                 if "," in raw_input:
-                    # 1. Splitten am Komma
-                    parts = raw_input.split(",", 1) # Nur am ersten Komma teilen
+                    parts = raw_input.split(",", 1)
                     titel_raw = parts[0].strip()
                     autor_fragment = parts[1].strip()
                     
                     if titel_raw and autor_fragment:
-                        with st.spinner("Prüfe Autor & suche Cover..."):
-                            # 2. Smart-Match: Den vollen Namen suchen
+                        with st.spinner("..."):
                             final_author = get_smart_author_name(autor_fragment, known_authors_list)
-                            
-                            # 3. Cover suchen (Heimlich)
                             cover_url = fetch_cover_background(titel_raw, final_author)
                             
-                            # 4. Speichern in Bücherliste
                             ws_books.append_row([
                                 titel_raw,
                                 final_author,
-                                "Roman", # Genre lassen wir simpel
+                                "Roman", 
                                 rating,
                                 cover_url
                             ])
-                            
-                            # 5. Falls der Autor GANZ neu war (Input == Output), fragen wir nicht, 
-                            # sondern speichern ihn NICHT automatisch in die Masterliste. 
-                            # Das soll sie lieber bewusst im Autoren-Tab machen, um Müll zu vermeiden.
                         
-                        st.success(f"Gespeichert!\nTitel: {titel_raw}\nAutor: {final_author}")
+                        st.success(f"Gespeichert!\n{titel_raw} ({final_author})")
                         if final_author != autor_fragment:
-                            st.info(f"ℹ️ Habe den Autor '{autor_fragment}' zu '{final_author}' vervollständigt!")
+                            st.caption(f"Autor vervollständigt zu: {final_author}")
                         
-                        time.sleep(2)
+                        time.sleep(1.5)
                         st.rerun()
                     else:
-                        st.error("Bitte Titel UND Autor eingeben.")
+                        st.error("Text fehlt.")
                 else:
-                    st.error("⚠️ Das Komma fehlt! Bitte 'Titel, Autor' eingeben.")
+                    st.error("⚠️ Komma vergessen! 'Titel, Autor'")
 
-        # --- TAB 2: AUTOREN VERWALTUNG (DER TWIST) ---
+        # --- TAB 2: AUTOREN ---
         with tab2:
-            st.header("Autoren-Verzeichnis")
-            st.info("Hier kannst du Autoren mit vollem Namen eintragen. Wenn du später Bücher einträgst, reicht der Nachname.")
+            st.header("Autoren-Liste")
             
-            # Einfache Tabelle zum Bearbeiten
-            # Wir nutzen data_editor, damit sie Namen korrigieren oder neue Zeilen anfügen kann
+            data_books_for_count = ws_books.get_all_records()
+            df_books_count = pd.DataFrame(data_books_for_count)
             
+            author_counts = {}
+            if not df_books_count.empty and "Autor" in df_books_count.columns:
+                author_counts = df_books_count["Autor"].value_counts().to_dict()
+
             if df_authors.empty:
-                # Leeres DataFrame erstellen, falls Sheet leer
                 df_authors = pd.DataFrame({"Name": [""]})
+
+            df_authors["Anzahl Bücher"] = df_authors["Name"].map(author_counts).fillna(0).astype(int)
 
             edited_authors = st.data_editor(
                 df_authors,
-                num_rows="dynamic", # Erlaubt Hinzufügen unten
+                num_rows="dynamic",
                 use_container_width=True,
                 column_config={
-                    "Name": st.column_config.TextColumn("Autorenname (Vollständig)", required=True)
+                    "Name": st.column_config.TextColumn("Name (Vollständig)", required=True),
+                    "Anzahl Bücher": st.column_config.NumberColumn("Bücher", disabled=True)
                 },
                 hide_index=True
             )
             
-            # Button zum Speichern der Änderungen an der Autorenliste
-            if st.button("👥 Autorenliste aktualisieren"):
-                # Umwandeln in Liste von Listen für GSpread
-                # Leerzeilen filtern
+            if st.button("👥 Liste aktualisieren"):
                 clean_data = edited_authors[edited_authors["Name"].astype(str).str.strip() != ""]
+                df_to_save = clean_data[["Name"]]
                 
-                # Sheet leeren und neu schreiben (einfachste Methode um Sync zu halten)
                 ws_authors.clear()
-                ws_authors.update_cell(1, 1, "Name") # Header wieder rein
-                if not clean_data.empty:
-                    ws_authors.update([clean_data.columns.values.tolist()] + clean_data.values.tolist())
+                ws_authors.update_cell(1, 1, "Name")
+                if not df_to_save.empty:
+                    ws_authors.update([df_to_save.columns.values.tolist()] + df_to_save.values.tolist())
                 
-                st.success("Autorenliste gespeichert!")
+                st.success("Gespeichert!")
                 time.sleep(1)
                 st.rerun()
 
-        # --- TAB 3: BÜCHERLISTE (Clean) ---
+        # --- TAB 3: BÜCHERLISTE ---
         with tab3:
             st.header("Sammlung")
             
-            # Daten laden
             data_books = ws_books.get_all_records()
             df_books = pd.DataFrame()
             if data_books:
                 df_books = pd.DataFrame(data_books)
-                # Spalten sicherstellen
                 for c in ["Titel", "Autor", "Bewertung", "Cover"]: 
                     if c not in df_books.columns: df_books[c] = ""
             
             if not df_books.empty:
                 df_books["Löschen"] = False
                 
-                # Suche
                 search = st.text_input("🔍 Suchen:", placeholder="Titel...", label_visibility="collapsed")
                 
                 df_view = df_books.copy()
@@ -248,13 +270,13 @@ def main():
                         df_view["Autor"].astype(str).str.contains(search, case=False)
                     ]
                 
-                # Anzeige
+                # Hier: "Löschen" steht ganz links!
                 with st.form("list_view"):
                     edited_df = st.data_editor(
                         df_view,
-                        column_order=["Titel", "Autor", "Bewertung", "Cover", "Löschen"],
+                        column_order=["Löschen", "Titel", "Autor", "Bewertung", "Cover"],
                         column_config={
-                            "Löschen": st.column_config.CheckboxColumn("X", width="small", default=False),
+                            "Löschen": st.column_config.CheckboxColumn("Weg?", width="small", default=False),
                             "Cover": st.column_config.ImageColumn("Img", width="small"),
                             "Titel": st.column_config.TextColumn("Titel", disabled=True),
                             "Autor": st.column_config.TextColumn("Autor", disabled=True),
@@ -276,7 +298,7 @@ def main():
                             time.sleep(1)
                             st.rerun()
             else:
-                st.info("Liste leer.")
+                st.info("Leer.")
 
     except Exception as e: st.error(f"Fehler: {e}")
 
