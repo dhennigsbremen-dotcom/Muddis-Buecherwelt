@@ -18,6 +18,7 @@ st.markdown("""
     .stApp { background-color: #f5f5dc; }
     .stApp, .stMarkdown, p, div, label, h1, h2, h3, h4, span { color: #4a3b2a !important; }
     
+    /* Buttons */
     .stButton button {
         background-color: #d35400 !important;
         color: white !important;
@@ -30,24 +31,29 @@ st.markdown("""
         margin-top: 10px;
     }
 
-    /* Tabs */
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        background-color: #eaddcf;
-        border-radius: 8px;
-        padding: 0px 10px !important;
-        font-size: 1.2rem !important;
-        font-weight: 700 !important;
-        color: #4a3b2a;
-        border: 1px solid #d35400;
-        flex-grow: 1;
-    }
-    .stTabs [aria-selected="true"] {
-        background-color: #d35400 !important;
-        color: white !important;
+    /* NAVIGATION (Radio Buttons als Kacheln verkleidet) */
+    div[role="radiogroup"] {
+        display: flex;
+        flex-direction: row;
+        justify-content: space-between;
+        gap: 10px;
+        width: 100%;
     }
     
+    /* Die einzelnen Nav-Knöpfe */
+    div[role="radiogroup"] label {
+        background-color: #eaddcf !important;
+        border: 1px solid #d35400;
+        border-radius: 8px;
+        padding: 10px;
+        flex-grow: 1;
+        text-align: center;
+        justify-content: center;
+        font-weight: bold;
+        color: #4a3b2a;
+    }
+
+    /* Eingabefelder */
     .stTextInput input {
         background-color: #fffaf0 !important;
         border: 2px solid #d35400 !important;
@@ -155,7 +161,7 @@ def process_genre(raw_genre):
         return translated
     except: return "Roman"
 
-# --- SUCHE (Google + OpenLibrary) ---
+# --- SUCHE ---
 def search_open_library_cover(titel, autor):
     try:
         query = f"{titel} {autor}".replace(" ", "+")
@@ -214,14 +220,12 @@ def silent_background_check(ws_books, df_books):
     if df_books.empty: return 0
     if "Cover" not in df_books.columns: return 0
     
-    # Bücher ohne Cover und OHNE Marker finden
     missing = df_books[ (df_books["Cover"] == "") | (df_books["Cover"].isnull()) ]
     missing = missing[ missing["Cover"] != NO_COVER_MARKER ]
     
     if not missing.empty:
         to_check = missing.head(3)
         updates = 0
-        
         all_vals = ws_books.get_all_values()
         headers = [str(h).lower() for h in all_vals[0]]
         
@@ -236,9 +240,7 @@ def silent_background_check(ws_books, df_books):
         for idx, row in to_check.iterrows():
             tit = row["Titel"]
             aut = row["Autor"]
-            
             nc, ng = fetch_book_data_background(tit, aut)
-            
             try:
                 cell = ws_books.find(tit)
                 if nc:
@@ -246,10 +248,8 @@ def silent_background_check(ws_books, df_books):
                     updates += 1
                 else:
                     ws_books.update_cell(cell.row, idx_c + 1, NO_COVER_MARKER)
-                
                 time.sleep(1)
             except: pass
-        
         return updates
     return 0
 
@@ -275,22 +275,29 @@ def main():
         added = sync_authors(ws_books, ws_authors)
         if added > 0: st.toast(f"✅ {added} Autoren synchronisiert!")
 
-        # BACKGROUND CHECK
+        # Silent Check
         if not st.session_state.background_check_done:
             updates = silent_background_check(ws_books, st.session_state.df_books)
             st.session_state.background_check_done = True
             if updates > 0:
-                st.toast(f"✨ Habe {updates} fehlende Bilder nachgeladen! (Klicke auf 'Neu laden' zum Sehen)", icon="🕵️‍♂️")
-                # Optional: Wir könnten hier das lokale DF updaten, aber ein Reload ist sicherer
+                st.toast(f"✨ Habe {updates} fehlende Bilder nachgeladen!", icon="🕵️‍♂️")
 
         known_authors_list = []
         if not st.session_state.df_authors.empty:
             known_authors_list = [a for a in st.session_state.df_authors["Name"].tolist() if str(a).strip()]
 
-        tab1, tab2, tab3 = st.tabs(["✍️ Neu", "👥 Autoren", "🔍 Liste"])
+        # --- NEUE NAVIGATION (Stabil) ---
+        # Anstatt st.tabs nutzen wir Radio Buttons, stylen sie aber wie Tabs.
+        # Das verhindert das Zurückspringen beim Tippen.
+        selected_nav = st.radio(
+            "Navigation", 
+            ["✍️ Neu", "👥 Autoren", "🔍 Liste"], 
+            horizontal=True,
+            label_visibility="collapsed"
+        )
         
         # --- TAB 1: EINGABE ---
-        with tab1:
+        if selected_nav == "✍️ Neu":
             st.header("Buch eintragen")
             st.markdown('<div class="small-hint">Eingeben: Titel, Autor<br>(das Komma ist wichtig!!!)</div>', unsafe_allow_html=True)
             
@@ -307,22 +314,22 @@ def main():
                         with st.spinner("Speichere & suche Cover..."):
                             final_author = get_smart_author_name(autor_frag, known_authors_list)
                             c, g = fetch_book_data_background(titel, final_author)
-                            
                             final_cover = c if c else NO_COVER_MARKER
                             
                             ws_books.append_row([titel, final_author, g, rating, final_cover])
                             del st.session_state.df_books
                         
                         st.success(f"Gespeichert: {titel}")
-                        st.balloons() # Hier fliegen sie jetzt!
-                        st.session_state.input_key += 1
-                        time.sleep(2.0) # Länger warten, damit man die Ballons sieht
+                        st.balloons() # PARTY! 🎈
+                        time.sleep(2) # Warten, damit man die Ballons sieht
+                        
+                        st.session_state.input_key += 1 # Feld leeren
                         st.rerun()
                     else: st.error("Text fehlt.")
                 else: st.error("⚠️ Komma vergessen!")
 
         # --- TAB 2: AUTOREN ---
-        with tab2:
+        elif selected_nav == "👥 Autoren":
             st.header("Autoren")
             df_b = st.session_state.df_books
             df_a = st.session_state.df_authors.copy()
@@ -352,7 +359,7 @@ def main():
                 st.rerun()
 
         # --- TAB 3: LISTE ---
-        with tab3:
+        elif selected_nav == "🔍 Liste":
             c_head, c_btn = st.columns([2,1])
             with c_head: st.header("Sammlung")
             with c_btn: 
@@ -361,11 +368,9 @@ def main():
             df_books = st.session_state.df_books.copy()
             if not df_books.empty:
                 df_books["Löschen"] = False
-                
-                # Marker ausblenden
                 df_books["Cover"] = df_books["Cover"].replace(NO_COVER_MARKER, None)
                 
-                # FIXED KEY für das Suchfeld verhindert das Springen!
+                # Suchen - KEY ist wichtig, damit Fokus bleibt
                 search = st.text_input("🔍 Suchen:", placeholder="Titel...", key="search_box_fixed")
                 
                 df_books["_Nachname"] = df_books["Autor"].apply(get_lastname)
@@ -422,20 +427,17 @@ def main():
                             if idx_t >= 0 and idx_c >= 0:
                                 for i, row in enumerate(all_vals[1:], start=2):
                                     cov = row[idx_c] if len(row) > idx_c else ""
-                                    # Manuell sucht IMMER, auch wenn Marker gesetzt ist (Reset)
                                     if not cov or cov == NO_COVER_MARKER:
                                         tit = row[idx_t] if len(row) > idx_t else ""
                                         aut = row[idx_a] if len(row) > idx_a else ""
                                         if tit:
                                             st.write(f"Suche für: {tit}")
                                             nc, ng = fetch_book_data_background(tit, aut)
-                                            
                                             if nc:
                                                 ws_books.update_cell(i, idx_c+1, nc)
                                                 updates += 1
                                             else:
                                                 ws_books.update_cell(i, idx_c+1, NO_COVER_MARKER)
-                                            
                                             time.sleep(1.5)
                             if updates > 0:
                                 del st.session_state.df_books
