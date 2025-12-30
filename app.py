@@ -8,7 +8,7 @@ import time
 # --- KONFIGURATION ---
 st.set_page_config(page_title="Mamas Bibliothek", page_icon="📚", layout="centered")
 
-# --- DESIGN (iPhone SE optimiert: GROSSE TABS) ---
+# --- DESIGN (iPhone SE optimiert) ---
 st.markdown("""
     <style>
     .stApp { background-color: #f5f5dc; }
@@ -27,9 +27,9 @@ st.markdown("""
         margin-top: 10px;
     }
 
-    /* --- TAB DESIGN: GROSS & GETRENNT --- */
+    /* --- TAB DESIGN --- */
     .stTabs [data-baseweb="tab-list"] {
-        gap: 8px; /* Lücke zwischen den Tabs */
+        gap: 8px;
     }
 
     .stTabs [data-baseweb="tab"] {
@@ -60,7 +60,7 @@ st.markdown("""
     /* Hinweise */
     .small-hint {
         font-size: 1.0rem;
-        color: #d35400 !important; /* Warnfarbe Orange */
+        color: #d35400 !important;
         font-weight: bold;
         margin-bottom: 5px;
     }
@@ -96,20 +96,20 @@ def sync_authors(ws_books, ws_authors):
     books_data = ws_books.get_all_records()
     if not books_data: return 0
     
-    # Autoren aus Büchern extrahieren
+    # Autoren extrahieren
     book_authors = set()
     for row in books_data:
         if "Autor" in row and str(row["Autor"]).strip():
             book_authors.add(str(row["Autor"]).strip())
             
-    # 2. Bestehende Autorenliste holen
+    # 2. Bestehende Autoren holen
     auth_data = ws_authors.get_all_records()
     existing_authors = set()
     for row in auth_data:
         if "Name" in row and str(row["Name"]).strip():
             existing_authors.add(str(row["Name"]).strip())
             
-    # 3. Was fehlt?
+    # 3. Abgleich
     missing = list(book_authors - existing_authors)
     missing.sort()
     
@@ -140,9 +140,20 @@ def get_smart_author_name(short_name, all_authors):
             return full_name 
     return short_name 
 
+def get_lastname(full_name):
+    """Hilfsfunktion für die Sortierung"""
+    if not isinstance(full_name, str) or not full_name.strip():
+        return ""
+    # Wir nehmen an, das letzte Wort ist der Nachname
+    return full_name.strip().split(" ")[-1].lower()
+
 # --- HAUPTPROGRAMM ---
 def main():
     st.title("📚 Mamas Bücherwelt")
+
+    # Initialisierung für das Leeren des Eingabefeldes
+    if "input_key" not in st.session_state:
+        st.session_state.input_key = 0
 
     try:
         client = get_connection()
@@ -162,18 +173,21 @@ def main():
         if not df_authors.empty and "Name" in df_authors.columns:
             known_authors_list = [a for a in df_authors["Name"].tolist() if str(a).strip()]
 
-        # Tabs (Kachel-Design)
+        # Tabs
         tab1, tab2, tab3 = st.tabs(["✍️ Neu", "👥 Autoren", "🔍 Liste"])
         
         # --- TAB 1: EINGABE ---
         with tab1:
             st.header("Buch eintragen")
-            
-            # HIER IST DER NEUE HINWEIS
             st.markdown('<div class="small-hint">Eingeben: Titel, Autor<br>(das Komma ist wichtig!!!)</div>', unsafe_allow_html=True)
             
-            # HIER IST DAS NEUE PLACEHOLDER
-            raw_input = st.text_input("Eingabe:", placeholder="Titel, Autor")
+            # WICHTIG: Wir nutzen einen dynamischen Key, um das Feld leeren zu können
+            # Wenn wir den Key ändern, "vergisst" Streamlit den alten Inhalt.
+            raw_input = st.text_input(
+                "Eingabe:", 
+                placeholder="Titel, Autor", 
+                key=f"book_input_{st.session_state.input_key}"
+            )
             
             rating = st.slider("Sterne:", 1, 5, 5)
             
@@ -200,6 +214,11 @@ def main():
                         if final_author != autor_fragment:
                             st.caption(f"Autor vervollständigt zu: {final_author}")
                         
+                        # BALLONS SIND ZURÜCK! 🎈
+                        st.balloons()
+                        
+                        # FELD LEEREN: Wir erhöhen den Key, dadurch wird ein "neues" leeres Feld erzeugt
+                        st.session_state.input_key += 1
                         time.sleep(1.5)
                         st.rerun()
                     else:
@@ -263,17 +282,25 @@ def main():
                 
                 search = st.text_input("🔍 Suchen:", placeholder="Titel...", label_visibility="collapsed")
                 
-                df_view = df_books.copy()
+                # --- SORTIER-LOGIK ---
+                # Wir berechnen IMMER den Nachnamen für die Sortierung
+                df_books["_Nachname"] = df_books["Autor"].apply(get_lastname)
+                
+                # Standardmäßig nach Nachnamen sortiert (A-Z)
+                df_view = df_books.sort_values(by="_Nachname")
+                
                 if search:
                     df_view = df_view[
                         df_view["Titel"].astype(str).str.contains(search, case=False) |
                         df_view["Autor"].astype(str).str.contains(search, case=False)
                     ]
                 
+                # Formular für die Tabelle
                 with st.form("list_view"):
+                    # REIHENFOLGE GEÄNDERT: Löschen ist jetzt ganz rechts (letzte Stelle)
                     edited_df = st.data_editor(
                         df_view,
-                        column_order=["Löschen", "Titel", "Autor", "Bewertung", "Cover"],
+                        column_order=["Titel", "Autor", "Bewertung", "Cover", "Löschen"],
                         column_config={
                             "Löschen": st.column_config.CheckboxColumn("Weg?", width="small", default=False),
                             "Cover": st.column_config.ImageColumn("Img", width="small"),
