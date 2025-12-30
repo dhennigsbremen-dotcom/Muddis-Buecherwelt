@@ -9,6 +9,9 @@ from deep_translator import GoogleTranslator
 # --- KONFIGURATION ---
 st.set_page_config(page_title="Mamas Bibliothek", page_icon="📚", layout="centered")
 
+# --- KONSTANTEN ---
+NO_COVER_MARKER = "-" # Das Zeichen, das sagt: "Suche erfolglos, nicht nochmal probieren!"
+
 # --- DESIGN ---
 st.markdown("""
     <style>
@@ -27,7 +30,6 @@ st.markdown("""
         margin-top: 10px;
     }
 
-    /* Tabs */
     .stTabs [data-baseweb="tab-list"] { gap: 8px; }
     .stTabs [data-baseweb="tab"] {
         height: 50px;
@@ -152,33 +154,25 @@ def process_genre(raw_genre):
         return translated
     except: return "Roman"
 
-# --- OPEN LIBRARY SUCHE (DER JOKER) ---
 def search_open_library_cover(titel, autor):
     try:
-        # OpenLibrary mag "Titel Autor" als Suchstring
         query = f"{titel} {autor}".replace(" ", "+")
         url = f"https://openlibrary.org/search.json?q={query}&limit=1"
-        # Header wichtig, damit wir nicht geblockt werden
         headers = {"User-Agent": "MamasBuecherweltApp/1.0"}
         response = requests.get(url, headers=headers, timeout=5)
-        
         if response.status_code == 200:
             data = response.json()
             if data.get("numFound", 0) > 0 and len(data.get("docs", [])) > 0:
                 item = data["docs"][0]
-                # Cover ID holen
                 if item.get("cover_i"):
                     return f"https://covers.openlibrary.org/b/id/{item.get('cover_i')}-M.jpg"
-    except:
-        return ""
+    except: return ""
     return ""
 
-# --- HYBRID SUCHE (Google + OpenLibrary) ---
 def fetch_book_data_background(titel, autor):
     cover = ""
     genre = "Roman"
     
-    # 1. Versuch: Google Books
     try:
         query = f"{titel} {autor}"
         url = f"https://www.googleapis.com/books/v1/volumes?q={query}&langRestrict=de&maxResults=1"
@@ -192,13 +186,10 @@ def fetch_book_data_background(titel, autor):
                 genre = process_genre(raw_cat)
     except: pass
 
-    # 2. Versuch: OpenLibrary (wenn Google kein Cover hatte)
     if not cover:
         try:
             ol_cover = search_open_library_cover(titel, autor)
-            if ol_cover:
-                cover = ol_cover
-                # Genre lassen wir, wenn Google es schon gefunden hat, sonst bleibt es Roman
+            if ol_cover: cover = ol_cover
         except: pass
 
     return cover, genre
@@ -215,11 +206,65 @@ def get_lastname(full_name):
     if not isinstance(full_name, str) or not full_name.strip(): return ""
     return full_name.strip().split(" ")[-1].lower()
 
+def silent_background_check(ws_books, df_books):
+    """
+    Sucht Cover für die ersten 3 leeren Einträge.
+    Setzt '-' wenn nichts gefunden wird, damit nicht erneut gesucht wird.
+    """
+    if df_books.empty: return 0
+    if "Cover" not in df_books.columns: return 0
+    
+    # Finde Bücher, die leer sind UND KEINEN MARKER ("-") haben
+    missing = df_books[ (df_books["Cover"] == "") | (df_books["Cover"].isnull()) ]
+    # Filtern: Schmeiß raus, was wir schon als "nicht gefunden" markiert haben (falls es im DF noch nicht aktualisiert ist)
+    # Da wir Daten von GSheets lesen, sollte "-" schon drin stehen, wenn es existiert.
+    
+    # WICHTIG: Das DataFrame liest "-" als Text ein.
+    missing = missing[ missing["Cover"] != NO_COVER_MARKER ]
+    
+    if not missing.empty:
+        to_check = missing.head(3)
+        updates = 0
+        
+        all_vals = ws_books.get_all_values()
+        headers = [str(h).lower() for h in all_vals[0]]
+        
+        idx_t = -1; idx_a = -1; idx_c = -1
+        for i, h in enumerate(headers):
+            if "titel" in h: idx_t = i
+            if "autor" in h: idx_a = i
+            if h in ["cover", "bild", "image", "img"]: idx_c = i
+            
+        if idx_c == -1 or idx_t == -1: return 0
+
+        for idx, row in to_check.iterrows():
+            tit = row["Titel"]
+            aut = row["Autor"]
+            
+            nc, ng = fetch_book_data_background(tit, aut)
+            
+            try:
+                cell = ws_books.find(tit)
+                if nc:
+                    # Bild gefunden -> Speichern
+                    ws_books.update_cell(cell.row, idx_c + 1, nc)
+                    updates += 1
+                else:
+                    # NICHTS gefunden -> Marker setzen!
+                    ws_books.update_cell(cell.row, idx_c + 1, NO_COVER_MARKER)
+                
+                time.sleep(1)
+            except: pass
+        
+        return updates
+    return 0
+
 # --- HAUPTPROGRAMM ---
 def main():
     st.title("📚 Mamas Bücherwelt")
 
     if "input_key" not in st.session_state: st.session_state.input_key = 0
+    if "background_check_done" not in st.session_state: st.session_state.background_check_done = False
 
     try:
         client = get_connection()
@@ -235,6 +280,13 @@ def main():
 
         added = sync_authors(ws_books, ws_authors)
         if added > 0: st.toast(f"✅ {added} Autoren synchronisiert!")
+
+        # BACKGROUND CHECK
+        if not st.session_state.background_check_done:
+            updates = silent_background_check(ws_books, st.session_state.df_books)
+            st.session_state.background_check_done = True
+            if updates > 0:
+                st.toast(f"✨ Habe {updates} fehlende Bilder nachgeladen!", icon="🕵️‍♂️")
 
         known_authors_list = []
         if not st.session_state.df_authors.empty:
@@ -257,12 +309,14 @@ def main():
                     autor_frag = parts[1].strip()
                     
                     if titel and autor_frag:
-                        with st.spinner("Speichere & suche Cover (Google + OpenLibrary)..."):
+                        with st.spinner("Speichere & suche Cover..."):
                             final_author = get_smart_author_name(autor_frag, known_authors_list)
                             c, g = fetch_book_data_background(titel, final_author)
                             
-                            ws_books.append_row([titel, final_author, g, rating, c])
+                            # Wenn nix gefunden, Marker setzen
+                            final_cover = c if c else NO_COVER_MARKER
                             
+                            ws_books.append_row([titel, final_author, g, rating, final_cover])
                             del st.session_state.df_books
                         
                         st.success(f"Gespeichert: {titel}")
@@ -276,13 +330,10 @@ def main():
         # --- TAB 2: AUTOREN ---
         with tab2:
             st.header("Autoren")
-            
             df_b = st.session_state.df_books
             df_a = st.session_state.df_authors.copy()
-            
             counts = {}
             if not df_b.empty: counts = df_b["Autor"].value_counts().to_dict()
-            
             if df_a.empty: df_a = pd.DataFrame({"Name": [""]})
             df_a["Anzahl Bücher"] = df_a["Name"].map(counts).fillna(0).astype(int)
 
@@ -296,14 +347,12 @@ def main():
                 },
                 hide_index=True
             )
-            
             if st.button("👥 Liste aktualisieren"):
                 clean = edited_authors[edited_authors["Name"].astype(str).str.strip() != ""]
                 df_save = clean[["Name"]]
                 ws_authors.clear()
                 ws_authors.update_cell(1, 1, "Name")
-                if not df_save.empty:
-                    ws_authors.update([df_save.columns.values.tolist()] + df_save.values.tolist())
+                if not df_save.empty: ws_authors.update([df_save.columns.values.tolist()] + df_save.values.tolist())
                 del st.session_state.df_authors
                 st.success("Gespeichert!")
                 st.rerun()
@@ -313,16 +362,18 @@ def main():
             c_head, c_btn = st.columns([2,1])
             with c_head: st.header("Sammlung")
             with c_btn: 
-                if st.button("🔄 Tabelle neu laden"):
-                    force_reload()
+                if st.button("🔄 Tabelle neu laden"): force_reload()
 
             df_books = st.session_state.df_books.copy()
-            
             if not df_books.empty:
                 df_books["Löschen"] = False
                 
-                search = st.text_input("🔍 Suchen:", placeholder="Titel...", label_visibility="collapsed")
+                # --- WICHTIG: Marker (-) für die Anzeige verstecken ---
+                # Wir ersetzen "-" durch None, damit Streamlit einfach "nichts" anzeigt,
+                # statt einem komischen Link-Symbol.
+                df_books["Cover"] = df_books["Cover"].replace(NO_COVER_MARKER, None)
                 
+                search = st.text_input("🔍 Suchen:", placeholder="Titel...", label_visibility="collapsed")
                 df_books["_Nachname"] = df_books["Autor"].apply(get_lastname)
                 df_view = df_books.sort_values(by="_Nachname")
                 
@@ -346,7 +397,6 @@ def main():
                         hide_index=True,
                         use_container_width=True
                     )
-                    
                     if st.form_submit_button("🗑️ Löschen"):
                         to_delete = edited_df[edited_df["Löschen"]==True]
                         if not to_delete.empty:
@@ -355,21 +405,18 @@ def main():
                                     cell = ws_books.find(row["Titel"])
                                     ws_books.delete_rows(cell.row)
                                 except: pass
-                            
                             del st.session_state.df_books
                             st.success("Gelöscht!")
                             time.sleep(1)
                             st.rerun()
 
                 st.markdown("---")
-                
                 with st.expander("🔧 Wartung & fehlende Cover"):
-                    st.write("Sucht in Google & OpenLibrary nach Bildern.")
-                    if st.button("🔄 Fehlende Bilder suchen"):
-                        with st.status("Durchsuche beide Datenbanken... (Geduld bitte!)", expanded=True) as status:
+                    st.write("Erzwingt Suche (Google + OpenLibrary).")
+                    if st.button("🔄 Fehlende Bilder suchen (Manuell)"):
+                        with st.status("Suche...", expanded=True):
                             all_vals = ws_books.get_all_values()
                             headers = [str(h).lower() for h in all_vals[0]]
-                            
                             idx_t = -1; idx_a = -1; idx_c = -1; idx_g = -1
                             for i, h in enumerate(headers):
                                 if "titel" in h: idx_t = i
@@ -381,27 +428,28 @@ def main():
                             if idx_t >= 0 and idx_c >= 0:
                                 for i, row in enumerate(all_vals[1:], start=2):
                                     cov = row[idx_c] if len(row) > idx_c else ""
-                                    if not cov:
+                                    # Manuell sucht IMMER, auch wenn Marker (-) gesetzt ist
+                                    if not cov or cov == NO_COVER_MARKER:
                                         tit = row[idx_t] if len(row) > idx_t else ""
                                         aut = row[idx_a] if len(row) > idx_a else ""
                                         if tit:
                                             st.write(f"Suche für: {tit}")
                                             nc, ng = fetch_book_data_background(tit, aut)
+                                            
                                             if nc:
                                                 ws_books.update_cell(i, idx_c+1, nc)
                                                 updates += 1
-                                            time.sleep(1.0) # Kurze Pause
-
-                            status.update(label="Fertig!", state="complete", expanded=False)
-                        
-                        if updates > 0:
-                            del st.session_state.df_books
-                            st.success(f"{updates} Bilder gefunden!")
-                            st.rerun()
-                        else:
-                            st.info("Nichts Neues gefunden (oder Datenbanken haben keine Bilder).")
-            else:
-                st.info("Liste leer. Drücke oben auf 'Tabelle neu laden'.")
+                                            else:
+                                                # Wieder Marker setzen (zur Bestätigung)
+                                                ws_books.update_cell(i, idx_c+1, NO_COVER_MARKER)
+                                            
+                                            time.sleep(1.5)
+                            if updates > 0:
+                                del st.session_state.df_books
+                                st.success(f"{updates} Bilder gefunden!")
+                                st.rerun()
+                            else: st.info("Nichts gefunden.")
+            else: st.info("Liste leer.")
 
     except Exception as e:
         st.error(f"Fehler: {e}")
