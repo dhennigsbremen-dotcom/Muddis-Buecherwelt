@@ -9,7 +9,7 @@ from deep_translator import GoogleTranslator
 # --- KONFIGURATION ---
 st.set_page_config(page_title="Mamas Bibliothek", page_icon="📚", layout="centered")
 
-# --- DESIGN (iPhone SE optimiert) ---
+# --- DESIGN ---
 st.markdown("""
     <style>
     .stApp { background-color: #f5f5dc; }
@@ -45,7 +45,6 @@ st.markdown("""
         color: white !important;
     }
     
-    /* Inputs */
     .stTextInput input {
         background-color: #fffaf0 !important;
         border: 2px solid #d35400 !important;
@@ -64,7 +63,6 @@ st.markdown("""
 
 # --- FUNKTIONEN ---
 
-@st.cache_resource
 def get_connection():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     if "gcp_service_account" in st.secrets:
@@ -86,71 +84,68 @@ def setup_sheets(client):
         ws_authors.update_cell(1, 1, "Name")
     return ws_books, ws_authors
 
-# --- CACHING & DATEN LADEN (ROBUST) ---
-@st.cache_data(ttl=60) # Cache für 60 Sekunden
-def load_data_robust(_worksheet_obj):
-    """Lädt Daten sicher und verzeiht Fehler in den Spaltennamen"""
+# --- DATEN LADEN (Manuelles Caching) ---
+def fetch_data_from_sheet(worksheet):
+    """Liest Daten direkt von Google und baut DataFrame"""
     try:
-        all_values = _worksheet_obj.get_all_values()
-        if len(all_values) < 2: 
-            return pd.DataFrame() # Leer oder nur Header
+        all_values = worksheet.get_all_values()
+        if len(all_values) < 2: return pd.DataFrame()
         
-        headers = [str(h).strip() for h in all_values[0]]
+        headers = [str(h).strip().lower() for h in all_values[0]]
         
-        # Wir mappen die Spalten, egal wo sie stehen
-        col_indices = {}
+        # Mapping erstellen
+        col_map = {}
         for idx, h in enumerate(headers):
-            h_low = h.lower()
-            if h_low == "titel": col_indices["Titel"] = idx
-            elif h_low == "autor": col_indices["Autor"] = idx
-            elif h_low in ["cover", "bild", "image", "img"]: col_indices["Cover"] = idx
-            elif h_low in ["sterne", "bewertung", "rating"]: col_indices["Bewertung"] = idx
-            elif h_low in ["genre", "kategorie"]: col_indices["Genre"] = idx
-            elif h_low == "name": col_indices["Name"] = idx # Für Autorenliste
+            if "titel" in h: col_map["Titel"] = idx
+            elif "autor" in h: col_map["Autor"] = idx
+            elif h in ["cover", "bild", "image", "img"]: col_map["Cover"] = idx
+            elif h in ["sterne", "bewertung", "rating"]: col_map["Bewertung"] = idx
+            elif h in ["genre", "kategorie"]: col_map["Genre"] = idx
+            elif "name" in h: col_map["Name"] = idx
 
-        # Daten Zeile für Zeile aufbauen
-        clean_rows = []
-        for row in all_values[1:]:
-            entry = {}
-            # Standardwerte falls Spalte fehlt
-            for needed in ["Titel", "Autor", "Cover", "Bewertung", "Genre", "Name"]:
-                entry[needed] = ""
+        rows = []
+        for raw_row in all_values[1:]:
+            entry = {
+                "Titel": "", "Autor": "", "Cover": "", 
+                "Bewertung": "", "Genre": "", "Name": ""
+            }
+            # Werte zuweisen
+            for key, idx in col_map.items():
+                if idx < len(raw_row):
+                    entry[key] = raw_row[idx]
             
-            # Werte füllen wo vorhanden
-            for col_name, idx in col_indices.items():
-                if idx < len(row):
-                    entry[col_name] = row[idx]
-            
-            # Nur hinzufügen, wenn nicht komplett leer
-            if entry.get("Titel") or entry.get("Autor") or entry.get("Name"):
-                clean_rows.append(entry)
+            # Nur volle Zeilen (entweder Buch oder Autor)
+            if entry["Titel"] or entry["Name"]:
+                rows.append(entry)
                 
-        return pd.DataFrame(clean_rows)
+        return pd.DataFrame(rows)
     except Exception as e:
-        # Im Notfall leeres DF zurückgeben statt Crash
+        st.error(f"Fehler beim Laden: {e}")
         return pd.DataFrame()
 
-def clear_cache():
-    st.cache_data.clear()
+def force_reload():
+    """Löscht den Speicher und zwingt zum Neuladen"""
+    if "df_books" in st.session_state: del st.session_state.df_books
+    if "df_authors" in st.session_state: del st.session_state.df_authors
+    st.rerun()
 
 def sync_authors(ws_books, ws_authors):
-    # Nur einmal pro Session ausführen um API zu schonen
     if "sync_done" in st.session_state: return 0
     
-    books_data = ws_books.get_all_records()
-    if not books_data: return 0
+    # Wir nutzen hier die DataFrames aus dem State, falls vorhanden, sonst laden
+    if "df_books" not in st.session_state:
+        st.session_state.df_books = fetch_data_from_sheet(ws_books)
+    if "df_authors" not in st.session_state:
+        st.session_state.df_authors = fetch_data_from_sheet(ws_authors)
+        
+    df_b = st.session_state.df_books
+    df_a = st.session_state.df_authors
     
-    book_authors = set()
-    for row in books_data:
-        if "Autor" in row and str(row["Autor"]).strip():
-            book_authors.add(str(row["Autor"]).strip())
-            
-    auth_data = ws_authors.get_all_records()
-    existing_authors = set()
-    for row in auth_data:
-        if "Name" in row and str(row["Name"]).strip():
-            existing_authors.add(str(row["Name"]).strip())
-            
+    if df_b.empty: return 0
+    
+    book_authors = set([a.strip() for a in df_b["Autor"].tolist() if a.strip()])
+    existing_authors = set([a.strip() for a in df_a["Name"].tolist() if a.strip()]) if not df_a.empty and "Name" in df_a else set()
+    
     missing = list(book_authors - existing_authors)
     missing.sort()
     
@@ -158,7 +153,8 @@ def sync_authors(ws_books, ws_authors):
         rows_to_add = [[name] for name in missing]
         ws_authors.append_rows(rows_to_add)
         st.session_state.sync_done = True
-        clear_cache() # Cache leeren nach Update
+        # Cache invalidieren
+        del st.session_state.df_authors
         return len(missing)
     
     st.session_state.sync_done = True
@@ -181,8 +177,7 @@ def fetch_book_data_background(titel, autor):
         query = f"{titel} {autor}"
         url = f"https://www.googleapis.com/books/v1/volumes?q={query}&langRestrict=de&maxResults=1"
         response = requests.get(url)
-        cover = ""
-        genre = "Roman"
+        cover, genre = "", "Roman"
         if response.status_code == 200:
             data = response.json()
             if "items" in data:
@@ -191,8 +186,7 @@ def fetch_book_data_background(titel, autor):
                 raw_cat = info.get("categories", ["Roman"])[0]
                 genre = process_genre(raw_cat)
         return cover, genre
-    except:
-        return "", "Roman"
+    except: return "", "Roman"
 
 def get_smart_author_name(short_name, all_authors):
     short_clean = short_name.strip().lower()
@@ -210,32 +204,29 @@ def get_lastname(full_name):
 def main():
     st.title("📚 Mamas Bücherwelt")
 
-    if "input_key" not in st.session_state:
-        st.session_state.input_key = 0
+    if "input_key" not in st.session_state: st.session_state.input_key = 0
 
     try:
         client = get_connection()
         if client is None: st.stop()
-        
         ws_books, ws_authors = setup_sheets(client)
+
+        # 1. DATEN LADEN (Nur wenn nicht schon da)
+        if "df_books" not in st.session_state:
+            with st.spinner("Lade Bücherregal..."):
+                st.session_state.df_books = fetch_data_from_sheet(ws_books)
         
-        # Notfall-Reload Button in Sidebar
-        with st.sidebar:
-            st.header("Einstellungen")
-            if st.button("🔄 Daten neu laden"):
-                clear_cache()
-                st.rerun()
+        if "df_authors" not in st.session_state:
+            st.session_state.df_authors = fetch_data_from_sheet(ws_authors)
 
-        # 1. Sync (gebremst)
-        added_count = sync_authors(ws_books, ws_authors)
-        if added_count > 0:
-            st.toast(f"✅ {added_count} Autoren synchronisiert!", icon="🧙‍♀️")
+        # 2. Sync
+        added = sync_authors(ws_books, ws_authors)
+        if added > 0: st.toast(f"✅ {added} Autoren synchronisiert!")
 
-        # 2. Daten laden mit robustem Cache
-        df_authors = load_data_robust(ws_authors)
+        # Listen vorbereiten
         known_authors_list = []
-        if not df_authors.empty and "Name" in df_authors.columns:
-            known_authors_list = [a for a in df_authors["Name"].tolist() if str(a).strip()]
+        if not st.session_state.df_authors.empty:
+            known_authors_list = [a for a in st.session_state.df_authors["Name"].tolist() if str(a).strip()]
 
         tab1, tab2, tab3 = st.tabs(["✍️ Neu", "👥 Autoren", "🔍 Liste"])
         
@@ -244,61 +235,49 @@ def main():
             st.header("Buch eintragen")
             st.markdown('<div class="small-hint">Eingeben: Titel, Autor<br>(das Komma ist wichtig!!!)</div>', unsafe_allow_html=True)
             
-            raw_input = st.text_input(
-                "Eingabe:", 
-                placeholder="Titel, Autor", 
-                key=f"book_input_{st.session_state.input_key}"
-            )
-            
+            raw_input = st.text_input("Eingabe:", placeholder="Titel, Autor", key=f"inp_{st.session_state.input_key}")
             rating = st.slider("Sterne:", 1, 5, 5)
             
             if st.button("💾 Speichern"):
                 if "," in raw_input:
                     parts = raw_input.split(",", 1)
-                    titel_raw = parts[0].strip()
-                    autor_fragment = parts[1].strip()
+                    titel = parts[0].strip()
+                    autor_frag = parts[1].strip()
                     
-                    if titel_raw and autor_fragment:
-                        with st.spinner("Speichere & suche Infos..."):
-                            final_author = get_smart_author_name(autor_fragment, known_authors_list)
-                            fetched_cover, fetched_genre = fetch_book_data_background(titel_raw, final_author)
+                    if titel and autor_frag:
+                        with st.spinner("Speichere..."):
+                            final_author = get_smart_author_name(autor_frag, known_authors_list)
+                            c, g = fetch_book_data_background(titel, final_author)
                             
-                            ws_books.append_row([
-                                titel_raw,
-                                final_author,
-                                fetched_genre, 
-                                rating,
-                                fetched_cover
-                            ])
-                            clear_cache() # Cache invalidieren
+                            ws_books.append_row([titel, final_author, g, rating, c])
+                            
+                            # Cache löschen erzwingt Neuladen beim nächsten Mal
+                            del st.session_state.df_books
                         
-                        st.success(f"Gespeichert!\n{titel_raw}")
-                        st.caption(f"Autor: {final_author}")
+                        st.success(f"Gespeichert: {titel}")
                         st.balloons()
                         st.session_state.input_key += 1
-                        time.sleep(1.5)
+                        time.sleep(1)
                         st.rerun()
-                    else:
-                        st.error("Text fehlt.")
-                else:
-                    st.error("⚠️ Komma vergessen! Bitte 'Titel, Autor' eingeben.")
+                    else: st.error("Text fehlt.")
+                else: st.error("⚠️ Komma vergessen!")
 
         # --- TAB 2: AUTOREN ---
         with tab2:
-            st.header("Autoren-Liste")
+            st.header("Autoren")
             
-            df_books_count = load_data_robust(ws_books)
-            author_counts = {}
-            if not df_books_count.empty and "Autor" in df_books_count.columns:
-                author_counts = df_books_count["Autor"].value_counts().to_dict()
-
-            if df_authors.empty: df_authors = pd.DataFrame({"Name": [""]})
+            # Zähler berechnen
+            df_b = st.session_state.df_books
+            df_a = st.session_state.df_authors.copy()
             
-            # Map robust machen
-            df_authors["Anzahl Bücher"] = df_authors["Name"].map(author_counts).fillna(0).astype(int)
+            counts = {}
+            if not df_b.empty: counts = df_b["Autor"].value_counts().to_dict()
+            
+            if df_a.empty: df_a = pd.DataFrame({"Name": [""]})
+            df_a["Anzahl Bücher"] = df_a["Name"].map(counts).fillna(0).astype(int)
 
             edited_authors = st.data_editor(
-                df_authors[["Name", "Anzahl Bücher"]], # Nur relevante Spalten
+                df_a[["Name", "Anzahl Bücher"]],
                 num_rows="dynamic",
                 use_container_width=True,
                 column_config={
@@ -309,23 +288,26 @@ def main():
             )
             
             if st.button("👥 Liste aktualisieren"):
-                clean_data = edited_authors[edited_authors["Name"].astype(str).str.strip() != ""]
-                df_to_save = clean_data[["Name"]]
+                clean = edited_authors[edited_authors["Name"].astype(str).str.strip() != ""]
+                df_save = clean[["Name"]]
                 ws_authors.clear()
                 ws_authors.update_cell(1, 1, "Name")
-                if not df_to_save.empty:
-                    ws_authors.update([df_to_save.columns.values.tolist()] + df_to_save.values.tolist())
-                
-                clear_cache()
+                if not df_save.empty:
+                    ws_authors.update([df_save.columns.values.tolist()] + df_save.values.tolist())
+                del st.session_state.df_authors
                 st.success("Gespeichert!")
-                time.sleep(1)
                 st.rerun()
 
-        # --- TAB 3: BÜCHERLISTE ---
+        # --- TAB 3: LISTE ---
         with tab3:
-            st.header("Sammlung")
-            
-            df_books = load_data_robust(ws_books)
+            c_head, c_btn = st.columns([2,1])
+            with c_head: st.header("Sammlung")
+            with c_btn: 
+                # HIER IST DER RETTUNGSKNOPF
+                if st.button("🔄 Tabelle neu laden"):
+                    force_reload()
+
+            df_books = st.session_state.df_books.copy()
             
             if not df_books.empty:
                 df_books["Löschen"] = False
@@ -365,77 +347,54 @@ def main():
                                     ws_books.delete_rows(cell.row)
                                 except: pass
                             
-                            clear_cache()
+                            del st.session_state.df_books
                             st.success("Gelöscht!")
                             time.sleep(1)
                             st.rerun()
 
                 st.markdown("---")
                 
-                with st.expander("🔧 Wartung & fehlende Cover"):
-                    st.write("Sucht nachträglich nach Bildern.")
+                with st.expander("🔧 Wartung"):
                     if st.button("🔄 Fehlende Bilder suchen"):
-                        updates_made = 0
-                        with st.status("Arbeite langsam (Google Bremse)...", expanded=True) as status:
-                            # Wir nutzen hier DIREKTEN Zugriff ohne Cache
-                            all_values = ws_books.get_all_values()
-                            headers = [str(h).lower().strip() for h in all_values[0]]
+                        with st.status("Suche...", expanded=True):
+                            all_vals = ws_books.get_all_values()
+                            headers = [str(h).lower() for h in all_vals[0]]
                             
-                            # Indices finden
-                            try:
-                                idx_titel = headers.index("titel")
-                                idx_autor = headers.index("autor")
-                                # Finde Cover index (flexibel)
-                                idx_cover = -1
-                                for candidate in ["cover", "bild", "image", "img"]:
-                                    if candidate in headers:
-                                        idx_cover = headers.index(candidate)
-                                        break
-                                
-                                idx_genre = -1
-                                if "genre" in headers: idx_genre = headers.index("genre")
-                            except:
-                                st.error("Kritischer Fehler: Spalten nicht gefunden.")
-                                st.stop()
-
-                            if idx_cover != -1:
-                                for i, row in enumerate(all_values[1:], start=2):
-                                    current_cover = row[idx_cover] if len(row) > idx_cover else ""
-                                    
-                                    if not current_cover:
-                                        titel = row[idx_titel] if len(row) > idx_titel else ""
-                                        autor = row[idx_autor] if len(row) > idx_autor else ""
-                                        
-                                        if titel:
-                                            st.write(f"Suche: {titel}...")
-                                            new_cover, new_genre = fetch_book_data_background(titel, autor)
-                                            
-                                            if new_cover:
-                                                ws_books.update_cell(i, idx_cover + 1, new_cover)
-                                                updates_made += 1
-                                            
-                                            if idx_genre != -1:
-                                                ws_books.update_cell(i, idx_genre + 1, new_genre)
-                                            
-                                            time.sleep(2.0) # BREMSE!
-
-                            status.update(label="Fertig!", state="complete", expanded=False)
-                        
-                        if updates_made > 0:
-                            clear_cache()
-                            st.success(f"{updates_made} Bilder gefunden!")
-                            time.sleep(2)
-                            st.rerun()
-                        else:
-                            st.info("Alles aktuell.")
+                            # Einfache Index-Suche
+                            idx_t = -1; idx_a = -1; idx_c = -1; idx_g = -1
+                            for i, h in enumerate(headers):
+                                if "titel" in h: idx_t = i
+                                if "autor" in h: idx_a = i
+                                if h in ["cover", "bild"]: idx_c = i
+                                if "genre" in h: idx_g = i
+                            
+                            if idx_t >= 0 and idx_c >= 0:
+                                updates = 0
+                                for i, row in enumerate(all_vals[1:], start=2):
+                                    cov = row[idx_c] if len(row) > idx_c else ""
+                                    if not cov:
+                                        tit = row[idx_t] if len(row) > idx_t else ""
+                                        aut = row[idx_a] if len(row) > idx_a else ""
+                                        if tit:
+                                            nc, ng = fetch_book_data_background(tit, aut)
+                                            if nc:
+                                                ws_books.update_cell(i, idx_c+1, nc)
+                                                updates += 1
+                                            time.sleep(1.5)
+                                if updates > 0:
+                                    del st.session_state.df_books
+                                    st.success(f"{updates} Bilder gefunden!")
+                                    st.rerun()
+                            else:
+                                st.error("Konnte Spalten nicht zuordnen.")
 
             else:
-                st.info("Liste leer (oder lädt noch).")
+                st.info("Liste leer (oder lade Daten...). Drücke oben rechts auf 'Neu laden'.")
 
-    except Exception as e: 
-        st.error(f"Ein Fehler ist aufgetreten: {e}")
-        if st.button("Cache leeren und neustarten"):
-            clear_cache()
+    except Exception as e:
+        st.error(f"Fehler: {e}")
+        if st.button("Notfall-Reset"):
+            st.session_state.clear()
             st.rerun()
 
 if __name__ == "__main__":
