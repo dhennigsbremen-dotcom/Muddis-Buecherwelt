@@ -286,9 +286,7 @@ def main():
         if not st.session_state.df_authors.empty:
             known_authors_list = [a for a in st.session_state.df_authors["Name"].tolist() if str(a).strip()]
 
-        # --- NEUE NAVIGATION (Stabil) ---
-        # Anstatt st.tabs nutzen wir Radio Buttons, stylen sie aber wie Tabs.
-        # Das verhindert das Zurückspringen beim Tippen.
+        # --- NAVIGATION ---
         selected_nav = st.radio(
             "Navigation", 
             ["✍️ Neu", "👥 Autoren", "🔍 Liste"], 
@@ -320,10 +318,10 @@ def main():
                             del st.session_state.df_books
                         
                         st.success(f"Gespeichert: {titel}")
-                        st.balloons() # PARTY! 🎈
-                        time.sleep(2) # Warten, damit man die Ballons sieht
+                        st.balloons() 
+                        time.sleep(2) 
                         
-                        st.session_state.input_key += 1 # Feld leeren
+                        st.session_state.input_key += 1
                         st.rerun()
                     else: st.error("Text fehlt.")
                 else: st.error("⚠️ Komma vergessen!")
@@ -337,6 +335,10 @@ def main():
             if not df_b.empty: counts = df_b["Autor"].value_counts().to_dict()
             if df_a.empty: df_a = pd.DataFrame({"Name": [""]})
             df_a["Anzahl Bücher"] = df_a["Name"].map(counts).fillna(0).astype(int)
+
+            # HIER IST DIE GESAMTSUMME
+            total_books = len(df_b)
+            st.metric("Bücher insgesamt:", total_books)
 
             edited_authors = st.data_editor(
                 df_a[["Name", "Anzahl Bücher"]],
@@ -370,16 +372,17 @@ def main():
                 df_books["Löschen"] = False
                 df_books["Cover"] = df_books["Cover"].replace(NO_COVER_MARKER, None)
                 
-                # Suchen - KEY ist wichtig, damit Fokus bleibt
                 search = st.text_input("🔍 Suchen:", placeholder="Titel...", key="search_box_fixed")
                 
                 df_books["_Nachname"] = df_books["Autor"].apply(get_lastname)
                 df_view = df_books.sort_values(by="_Nachname")
                 
                 if search:
+                    # HIER IST DER LEERZEICHEN-FILTER (STRIP)
+                    clean_search = search.strip()
                     df_view = df_view[
-                        df_view["Titel"].astype(str).str.contains(search, case=False) |
-                        df_view["Autor"].astype(str).str.contains(search, case=False)
+                        df_view["Titel"].astype(str).str.contains(clean_search, case=False) |
+                        df_view["Autor"].astype(str).str.contains(clean_search, case=False)
                     ]
                 
                 with st.form("list_view"):
