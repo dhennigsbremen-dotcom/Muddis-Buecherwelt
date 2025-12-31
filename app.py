@@ -40,7 +40,6 @@ st.markdown("""
         width: 100%;
     }
     
-    /* Die einzelnen Nav-Knöpfe */
     div[role="radiogroup"] label {
         background-color: #eaddcf !important;
         border: 1px solid #d35400;
@@ -207,7 +206,13 @@ def fetch_book_data_background(titel, autor):
 def get_smart_author_name(short_name, all_authors):
     short_clean = short_name.strip().lower()
     if not short_clean: return short_name
-    for full_name in all_authors:
+    
+    # TRICK: Wir sortieren die Liste nach LÄNGE (Längster Name zuerst).
+    # Damit wird "Margaret Atwood" VOR "Atwood" geprüft.
+    # Wenn "Atwood" in "Margaret Atwood" steckt, nehmen wir sofort den langen Namen.
+    sorted_authors = sorted(all_authors, key=len, reverse=True)
+    
+    for full_name in sorted_authors:
         if short_clean in str(full_name).lower():
             return full_name 
     return short_name 
@@ -294,15 +299,20 @@ def main():
             label_visibility="collapsed"
         )
         
-        # --- TAB 1: EINGABE ---
+        # --- TAB 1: EINGABE (FORMULAR für ENTER-TASTE) ---
         if selected_nav == "✍️ Neu":
             st.header("Buch eintragen")
             st.markdown('<div class="small-hint">Eingeben: Titel, Autor<br>(das Komma ist wichtig!!!)</div>', unsafe_allow_html=True)
             
-            raw_input = st.text_input("Eingabe:", placeholder="Titel, Autor", key=f"inp_{st.session_state.input_key}")
-            rating = st.slider("Sterne:", 1, 5, 5)
+            # Formular Start!
+            with st.form("new_book_form", clear_on_submit=False):
+                raw_input = st.text_input("Eingabe:", placeholder="Titel, Autor", key=f"inp_{st.session_state.input_key}")
+                rating = st.slider("Sterne:", 1, 5, 5)
+                
+                # Dieser Button reagiert nun auf die ENTER-Taste im Textfeld!
+                submitted = st.form_submit_button("💾 Speichern")
             
-            if st.button("💾 Speichern"):
+            if submitted:
                 if "," in raw_input:
                     parts = raw_input.split(",", 1)
                     titel = parts[0].strip()
@@ -318,6 +328,9 @@ def main():
                             del st.session_state.df_books
                         
                         st.success(f"Gespeichert: {titel}")
+                        if final_author != autor_frag:
+                            st.info(f"Autor vervollständigt: {final_author}")
+                            
                         st.balloons() 
                         time.sleep(2) 
                         
@@ -336,9 +349,13 @@ def main():
             if df_a.empty: df_a = pd.DataFrame({"Name": [""]})
             df_a["Anzahl Bücher"] = df_a["Name"].map(counts).fillna(0).astype(int)
 
-            # HIER IST DIE GESAMTSUMME
+            # GESAMTSUMME
             total_books = len(df_b)
             st.metric("Bücher insgesamt:", total_books)
+
+            # SORTIERUNG NACH NACHNAME
+            df_a["_Nachname"] = df_a["Name"].apply(get_lastname)
+            df_a = df_a.sort_values(by="_Nachname")
 
             edited_authors = st.data_editor(
                 df_a[["Name", "Anzahl Bücher"]],
@@ -378,7 +395,7 @@ def main():
                 df_view = df_books.sort_values(by="_Nachname")
                 
                 if search:
-                    # HIER IST DER LEERZEICHEN-FILTER (STRIP)
+                    # LEERZEICHEN-KILLER
                     clean_search = search.strip()
                     df_view = df_view[
                         df_view["Titel"].astype(str).str.contains(clean_search, case=False) |
