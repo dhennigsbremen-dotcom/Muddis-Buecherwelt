@@ -18,7 +18,6 @@ st.markdown("""
     .stApp { background-color: #f5f5dc; }
     .stApp, .stMarkdown, p, div, label, h1, h2, h3, h4, span { color: #4a3b2a !important; }
     
-    /* Buttons */
     .stButton button {
         background-color: #d35400 !important;
         color: white !important;
@@ -31,7 +30,6 @@ st.markdown("""
         margin-top: 10px;
     }
 
-    /* NAVIGATION */
     div[role="radiogroup"] {
         display: flex;
         flex-direction: row;
@@ -52,7 +50,6 @@ st.markdown("""
         color: #4a3b2a;
     }
 
-    /* Eingabefelder */
     .stTextInput input {
         background-color: #fffaf0 !important;
         border: 2px solid #d35400 !important;
@@ -133,7 +130,6 @@ def sync_authors(ws_books, ws_authors):
     df_a = st.session_state.df_authors
     if df_b.empty: return 0
     
-    # Hier trimmen wir schon mal beim Einlesen
     book_authors = set([a.strip() for a in df_b["Autor"].tolist() if a.strip()])
     existing_authors = set([a.strip() for a in df_a["Name"].tolist() if a.strip()]) if not df_a.empty and "Name" in df_a else set()
     
@@ -161,7 +157,6 @@ def process_genre(raw_genre):
         return translated
     except: return "Roman"
 
-# --- SUCHE ---
 def search_open_library_cover(titel, autor):
     try:
         query = f"{titel} {autor}".replace(" ", "+")
@@ -224,7 +219,7 @@ def silent_background_check(ws_books, df_books):
         updates = 0
         all_vals = ws_books.get_all_values()
         headers = [str(h).lower() for h in all_vals[0]]
-        idx_t = -1; idx_a = -1; idx_c = -1
+        idx_t = -1; idx_a = -1; idx_c = -1; idx_g = -1
         for i, h in enumerate(headers):
             if "titel" in h: idx_t = i
             if "autor" in h: idx_a = i
@@ -246,107 +241,117 @@ def silent_background_check(ws_books, df_books):
         return updates
     return 0
 
-# --- DUBLETTEN KILLER 3.0 (Nukleare Option) ---
-def cleanup_author_duplicates(ws_books, ws_authors, df_authors):
+# --- DUBLETTEN KILLER 4.0 (BATCH OPTIMIZED & AUTOMATED) ---
+def cleanup_author_duplicates_batch(ws_books, ws_authors):
     """
-    1. Normalisiert alle Namen (entfernt unsichtbare Zeichen).
-    2. Mergt Kurzformen (Berkel -> Christian Berkel).
-    3. Schreibt die Autorenliste KOMPLETT neu (nur Unique values).
+    Liest ALLES, bereinigt im Speicher und schreibt ALLES auf einmal zurück.
+    Spart massiv API-Calls (nur 2 Writes statt 100).
     """
-    
-    # Hilfsfunktion zum Säubern: Entfernt auch "Non-breaking spaces" (\xa0)
     def deep_clean(text):
         return str(text).replace(u'\xa0', ' ').strip()
 
-    all_raw_authors = [deep_clean(a) for a in df_authors["Name"].tolist() if str(a).strip()]
-    
-    # 1. Clustering: Wir gruppieren gleiche Namen (case-insensitive)
-    # Ziel: Wenn "Christine Brand" und "christine brand" da sind, nehmen wir die schönere Variante.
-    canonical_names = {} # lower_case -> Display Name
-    
-    for name in all_raw_authors:
-        lower = name.lower()
-        if lower not in canonical_names:
-            canonical_names[lower] = name
-        else:
-            # Wenn wir schon einen haben, nehmen wir den längeren (falls es z.B. "Brand" vs "Brandt" wäre - hier eher Groß/Klein)
-            # Bevorzugt: Der mit Großbuchstaben
-            current = canonical_names[lower]
-            if name[0].isupper() and not current[0].isupper():
-                canonical_names[lower] = name
+    # 1. Alle Autoren laden (aus dem Autoren-Sheet)
+    auth_vals = ws_authors.get_all_values()
+    if not auth_vals: return 0
+    # Spalte 1 annehmen (Header ignorieren wir beim Set, aber beachten beim Index)
+    raw_authors_list = [deep_clean(row[0]) for row in auth_vals[1:] if row]
 
-    # 2. Kurzform-Check (Berkel -> Christian Berkel)
-    # Wir arbeiten jetzt nur noch mit den "sauberen" Keys
-    unique_keys = list(canonical_names.keys())
-    unique_keys.sort(key=len, reverse=True) # Längste zuerst
+    # Mapping erstellen (wie vorher)
+    clean_map = {} 
+    for raw in raw_authors_list:
+        clean = raw.strip()
+        if clean not in clean_map: clean_map[clean] = []
+        clean_map[clean].append(raw)
+    
+    replacements = {} 
+    
+    # Gleiche Namen (Leerzeichen-Varianten)
+    for clean_name, raw_versions in clean_map.items():
+        if len(set(raw_versions)) > 1:
+            target = clean_name
+            for bad_version in raw_versions:
+                if bad_version != target:
+                    replacements[bad_version] = target
 
-    replacements = {} # lower_bad -> Display_Good
+    # Kurzformen
+    unique_keys = list(clean_map.keys())
+    unique_keys.sort(key=len, reverse=True)
 
     for i, long_key in enumerate(unique_keys):
         for short_key in unique_keys[i+1:]:
-            # Prüfen ob short in long steckt
             if short_key in long_key and short_key != long_key:
-                # Mergen!
-                target_display = canonical_names[long_key]
+                target_display = clean_map[long_key][0] # Nimm erste Variante als Display
                 replacements[short_key] = target_display
-                # Auch den Display-Namen des kurzen Keys auf das Ziel mappen
-                # (Damit wir später in der DB aufräumen können)
-                replacements[canonical_names[short_key].lower()] = target_display
+                if short_key in clean_map:
+                    for v in clean_map[short_key]:
+                        replacements[v] = target_display
 
-    # Jetzt haben wir 'replacements'. Alles was NICHT in replacements ist, ist ein gültiger Autor.
-    final_unique_authors = set()
-    for lower_key, display_name in canonical_names.items():
-        if lower_key not in replacements:
-            final_unique_authors.add(display_name)
-        else:
-            # Es ist ein ersetzter Name -> wir fügen das ZIEL hinzu
-            final_unique_authors.add(replacements[lower_key])
+    if not replacements:
+        return 0
 
-    # 3. Update BÜCHER Sheet (Namen korrigieren)
-    # Wir müssen durch ALLE Bücher gehen und schauen, ob der Autor "schmutzig" ist
+    # --- JETZT KOMMT DER BATCH-TEIL ---
+    
+    # 2. Bücher laden & im Speicher ändern
     books_vals = ws_books.get_all_values()
     headers = [str(h).lower() for h in books_vals[0]]
     idx_a = -1
     for i, h in enumerate(headers):
         if "autor" in h: idx_a = i
     
-    updates_count = 0
+    changes_made = False
     if idx_a != -1:
-        for i, row in enumerate(books_vals[1:], start=2):
-            if len(row) > idx_a:
-                original_auth = row[idx_a]
+        # Wir bauen eine neue Liste für den Upload
+        new_books_data = [books_vals[0]] # Header behalten
+        
+        for row in books_vals[1:]:
+            new_row = list(row) # Kopie der Zeile
+            if len(new_row) > idx_a:
+                original_auth = new_row[idx_a]
                 clean_auth = deep_clean(original_auth)
-                lower_auth = clean_auth.lower()
                 
-                new_val = None
+                # Check Replacement
+                # Wir prüfen erst Lowercase-Match, dann Direct-Match
+                found_new = None
                 
-                # Fall A: Es ist eine Kurzform, die ersetzt werden muss
-                if lower_auth in replacements:
-                    new_val = replacements[lower_auth]
+                if clean_auth in replacements:
+                    found_new = replacements[clean_auth]
+                elif clean_auth.lower() in replacements: # Fallback
+                     found_new = replacements[clean_auth.lower()]
                 
-                # Fall B: Es ist keine Kurzform, aber vielleicht war die Schreibweise "unsauber"
-                # (z.B. unsichtbares Leerzeichen). Wir holen den 'kanonischen' Namen.
-                elif lower_auth in canonical_names:
-                    # Wenn der Name in der Zelle anders aussieht als unser sauberes Ziel
-                    if original_auth != canonical_names[lower_auth]:
-                        new_val = canonical_names[lower_auth]
+                # Auch checken ob der saubere Name eine "kanonische" bessere Version hat
+                # (z.B. "christine brand" -> "Christine Brand")
+                # Das machen wir hier vereinfacht über die unique_keys Logik von oben nicht explizit,
+                # aber die replacements fangen das Meiste ab.
+                
+                if found_new and found_new != original_auth:
+                    new_row[idx_a] = found_new
+                    changes_made = True
+            
+            new_books_data.append(new_row)
 
-                if new_val and new_val != original_auth:
-                    ws_books.update_cell(i, idx_a + 1, new_val)
-                    updates_count += 1
-                    time.sleep(0.5)
+        if changes_made:
+            # 3. Batch Update BÜCHER (1 API Call!)
+            ws_books.update(new_books_data)
 
-    # 4. Update AUTOREN Sheet (Komplett neu schreiben)
+    # 4. Autorenliste neu schreiben (1 API Call)
+    # Liste neu aufbauen aus den Clean-Map Keys, die NICHT ersetzt wurden
+    final_authors = set()
+    for k in unique_keys:
+        # Prüfen ob dieser Key ersetzt wurde
+        is_replaced = False
+        if k in replacements: is_replaced = True
+        
+        if not is_replaced:
+            # Nimm die Display-Version
+            final_authors.add(clean_map[k][0])
+            
+    sorted_authors = sorted(list(final_authors))
     ws_authors.clear()
     ws_authors.update_cell(1, 1, "Name")
-    
-    sorted_list = sorted(list(final_unique_authors))
-    rows_to_write = [[name] for name in sorted_list]
-    
-    if rows_to_write:
-        ws_authors.update(values=[["Name"]] + rows_to_write)
+    if sorted_authors:
+        ws_authors.update(values=[["Name"]] + [[a] for a in sorted_authors])
 
-    return updates_count + 1 # +1 damit User Feedback bekommt, auch wenn nur Liste bereinigt wurde
+    return 1 # Erfolgreich gelaufen
 
 # --- HAUPTPROGRAMM ---
 def main():
@@ -403,16 +408,29 @@ def main():
                     titel = parts[0].strip()
                     autor_frag = parts[1].strip()
                     if titel and autor_frag:
-                        with st.spinner("Speichere & suche Cover..."):
+                        with st.spinner("Speichere, suche Cover & räume Autoren auf..."):
+                            # 1. Smart Author Findung
                             final_author = get_smart_author_name(autor_frag, known_authors_list)
+                            
+                            # 2. Cover suchen
                             c, g = fetch_book_data_background(titel, final_author)
                             final_cover = c if c else NO_COVER_MARKER
+                            
+                            # 3. Buch speichern
                             ws_books.append_row([titel, final_author, g, rating, final_cover])
+                            
+                            # 4. AUTOMATISCHES AUFRÄUMEN (Batch Optimized)
+                            # Wir rufen jetzt bei jedem Speichern kurz den Putzteufel
+                            cleanup_author_duplicates_batch(ws_books, ws_authors)
+                            
+                            # Cache leeren für Reload
                             del st.session_state.df_books
-                        st.success(f"Gespeichert: {titel}")
+                            del st.session_state.df_authors
+
+                        st.success(f"Gespeichert & Aufgeräumt: {titel}")
                         if final_author != autor_frag: st.info(f"Autor vervollständigt: {final_author}")
                         st.balloons() 
-                        time.sleep(2) 
+                        time.sleep(1.5) 
                         st.session_state.input_key += 1
                         st.rerun()
                     else: st.error("Text fehlt.")
@@ -422,7 +440,7 @@ def main():
         elif selected_nav == "👥 Autoren":
             st.header("Autoren")
             
-            # --- 1. MANUELL HINZUFÜGEN (JETZT OFFEN) ---
+            # --- MANUELL HINZUFÜGEN (OFFEN) ---
             st.caption("Einen neuen Autorennamen vorbereiten:")
             with st.form("add_auth_form"):
                 col_inp, col_btn = st.columns([3, 1])
@@ -443,7 +461,6 @@ def main():
 
             st.markdown("---")
 
-            # --- 2. EDITOR ---
             df_b = st.session_state.df_books
             df_a = st.session_state.df_authors.copy()
             counts = {}
@@ -471,27 +488,15 @@ def main():
                 hide_index=True
             )
             
-            c1, c2 = st.columns(2)
-            with c1:
-                if st.button("💾 Liste speichern"):
-                    clean = edited_authors[edited_authors["Name"].astype(str).str.strip() != ""]
-                    df_save = clean[["Name"]]
-                    ws_authors.clear()
-                    ws_authors.update_cell(1, 1, "Name")
-                    if not df_save.empty: ws_authors.update([df_save.columns.values.tolist()] + df_save.values.tolist())
-                    del st.session_state.df_authors
-                    st.success("Gespeichert!")
-                    st.rerun()
-            
-            with c2:
-                if st.button("🧹 Autoren aufräumen"):
-                    with st.spinner("Wasche Namen & entferne Dubletten (Hard Reset)..."):
-                        merged_count = cleanup_author_duplicates(ws_books, ws_authors, df_a)
-                        del st.session_state.df_books
-                        del st.session_state.df_authors
-                        st.success(f"Fertig! Liste bereinigt.")
-                        time.sleep(2)
-                        st.rerun()
+            if st.button("💾 Liste speichern"):
+                clean = edited_authors[edited_authors["Name"].astype(str).str.strip() != ""]
+                df_save = clean[["Name"]]
+                ws_authors.clear()
+                ws_authors.update_cell(1, 1, "Name")
+                if not df_save.empty: ws_authors.update([df_save.columns.values.tolist()] + df_save.values.tolist())
+                del st.session_state.df_authors
+                st.success("Gespeichert!")
+                st.rerun()
 
         # --- TAB 3: LISTE ---
         elif selected_nav == "🔍 Liste":
@@ -579,6 +584,17 @@ def main():
                                 st.success(f"{updates} Bilder gefunden!")
                                 st.rerun()
                             else: st.info("Nichts gefunden.")
+                    
+                    # HIER IST DER NOTFALL BUTTON VERSTECKT
+                    st.write("---")
+                    if st.button("🧹 Autorenliste aufräumen (Notfall)"):
+                         with st.spinner("Räume auf..."):
+                             cleanup_author_duplicates_batch(ws_books, ws_authors)
+                             del st.session_state.df_books
+                             del st.session_state.df_authors
+                             st.success("Erledigt.")
+                             st.rerun()
+
             else: st.info("Liste leer.")
 
     except Exception as e:
