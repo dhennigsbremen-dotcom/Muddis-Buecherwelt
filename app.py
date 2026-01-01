@@ -179,8 +179,6 @@ def search_open_library_cover(titel, autor):
 def fetch_book_data_background(titel, autor):
     cover = ""
     genre = "Roman"
-    
-    # 1. Google
     try:
         query = f"{titel} {autor}"
         url = f"https://www.googleapis.com/books/v1/volumes?q={query}&langRestrict=de&maxResults=1"
@@ -194,7 +192,6 @@ def fetch_book_data_background(titel, autor):
                 genre = process_genre(raw_cat)
     except: pass
 
-    # 2. OpenLibrary (Joker)
     if not cover:
         try:
             ol_cover = search_open_library_cover(titel, autor)
@@ -206,12 +203,7 @@ def fetch_book_data_background(titel, autor):
 def get_smart_author_name(short_name, all_authors):
     short_clean = short_name.strip().lower()
     if not short_clean: return short_name
-    
-    # TRICK: Wir sortieren die Liste nach LÄNGE (Längster Name zuerst).
-    # Damit wird "Margaret Atwood" VOR "Atwood" geprüft.
-    # Wenn "Atwood" in "Margaret Atwood" steckt, nehmen wir sofort den langen Namen.
     sorted_authors = sorted(all_authors, key=len, reverse=True)
-    
     for full_name in sorted_authors:
         if short_clean in str(full_name).lower():
             return full_name 
@@ -224,24 +216,19 @@ def get_lastname(full_name):
 def silent_background_check(ws_books, df_books):
     if df_books.empty: return 0
     if "Cover" not in df_books.columns: return 0
-    
     missing = df_books[ (df_books["Cover"] == "") | (df_books["Cover"].isnull()) ]
     missing = missing[ missing["Cover"] != NO_COVER_MARKER ]
-    
     if not missing.empty:
         to_check = missing.head(3)
         updates = 0
         all_vals = ws_books.get_all_values()
         headers = [str(h).lower() for h in all_vals[0]]
-        
         idx_t = -1; idx_a = -1; idx_c = -1
         for i, h in enumerate(headers):
             if "titel" in h: idx_t = i
             if "autor" in h: idx_a = i
             if h in ["cover", "bild", "image", "img"]: idx_c = i
-            
         if idx_c == -1 or idx_t == -1: return 0
-
         for idx, row in to_check.iterrows():
             tit = row["Titel"]
             aut = row["Autor"]
@@ -257,6 +244,66 @@ def silent_background_check(ws_books, df_books):
             except: pass
         return updates
     return 0
+
+# --- SPEZIALFUNKTION: DUBLETTEN KILLER ---
+def cleanup_author_duplicates(ws_books, ws_authors, df_authors):
+    """
+    Sucht nach 'Berkel' und 'Christian Berkel' und führt sie zusammen.
+    Das Längere gewinnt.
+    """
+    all_authors = [a for a in df_authors["Name"].tolist() if str(a).strip()]
+    # Sortiere nach Länge (längste zuerst), damit 'Christian Berkel' vor 'Berkel' kommt
+    all_authors.sort(key=len, reverse=True)
+    
+    replacements = {} # Speichert "Berkel" -> "Christian Berkel"
+    
+    # Finde Dubletten (Kurzform in Langform)
+    for i, long_name in enumerate(all_authors):
+        for short_name in all_authors[i+1:]:
+            # Wenn der kurze Name im langen steckt UND sie nicht gleich sind
+            if short_name.lower() in long_name.lower() and short_name.lower() != long_name.lower():
+                # Sicherheitscheck: Nicht "Mann" in "Hermann" mergen, sondern nur echte Nachnamen
+                # Wir nehmen an: Wenn der kurze Name exakt dem Nachnamen des langen entspricht.
+                # Oder einfacher: Wir vertrauen darauf, dass Mama keine Autoren hat, die "Christian" heißen und "Christian Berkel".
+                replacements[short_name] = long_name
+
+    if not replacements:
+        return 0
+
+    # 1. Update BÜCHER Sheet
+    books_vals = ws_books.get_all_values()
+    headers = [str(h).lower() for h in books_vals[0]]
+    idx_a = -1
+    for i, h in enumerate(headers):
+        if "autor" in h: idx_a = i
+    
+    updates_count = 0
+    if idx_a != -1:
+        for i, row in enumerate(books_vals[1:], start=2):
+            current_auth = row[idx_a]
+            if current_auth in replacements:
+                new_auth = replacements[current_auth]
+                ws_books.update_cell(i, idx_a + 1, new_auth)
+                updates_count += 1
+                time.sleep(0.5) # Bissel bremsen
+
+    # 2. Update AUTOREN Sheet (Löschen der kurzen Namen)
+    # Wir löschen einfach die ganze Autorenliste und schreiben die 'Guten' neu rein
+    # Das ist sicherer als Zeilen löschen
+    
+    # Neue saubere Liste erstellen
+    clean_author_list = []
+    for auth in all_authors:
+        # Wenn der Autor NICHT ersetzt wurde, darf er bleiben
+        if auth not in replacements:
+            clean_author_list.append([auth])
+            
+    ws_authors.clear()
+    ws_authors.update_cell(1, 1, "Name")
+    if clean_author_list:
+        ws_authors.update(values=[["Name"]] + clean_author_list) # Mit Header neu schreiben
+
+    return len(replacements)
 
 # --- HAUPTPROGRAMM ---
 def main():
@@ -280,7 +327,6 @@ def main():
         added = sync_authors(ws_books, ws_authors)
         if added > 0: st.toast(f"✅ {added} Autoren synchronisiert!")
 
-        # Silent Check
         if not st.session_state.background_check_done:
             updates = silent_background_check(ws_books, st.session_state.df_books)
             st.session_state.background_check_done = True
@@ -291,7 +337,6 @@ def main():
         if not st.session_state.df_authors.empty:
             known_authors_list = [a for a in st.session_state.df_authors["Name"].tolist() if str(a).strip()]
 
-        # --- NAVIGATION ---
         selected_nav = st.radio(
             "Navigation", 
             ["✍️ Neu", "👥 Autoren", "🔍 Liste"], 
@@ -299,17 +344,14 @@ def main():
             label_visibility="collapsed"
         )
         
-        # --- TAB 1: EINGABE (FORMULAR für ENTER-TASTE) ---
+        # --- TAB 1: EINGABE ---
         if selected_nav == "✍️ Neu":
             st.header("Buch eintragen")
             st.markdown('<div class="small-hint">Eingeben: Titel, Autor<br>(das Komma ist wichtig!!!)</div>', unsafe_allow_html=True)
             
-            # Formular Start!
             with st.form("new_book_form", clear_on_submit=False):
                 raw_input = st.text_input("Eingabe:", placeholder="Titel, Autor", key=f"inp_{st.session_state.input_key}")
                 rating = st.slider("Sterne:", 1, 5, 5)
-                
-                # Dieser Button reagiert nun auf die ENTER-Taste im Textfeld!
                 submitted = st.form_submit_button("💾 Speichern")
             
             if submitted:
@@ -317,23 +359,17 @@ def main():
                     parts = raw_input.split(",", 1)
                     titel = parts[0].strip()
                     autor_frag = parts[1].strip()
-                    
                     if titel and autor_frag:
                         with st.spinner("Speichere & suche Cover..."):
                             final_author = get_smart_author_name(autor_frag, known_authors_list)
                             c, g = fetch_book_data_background(titel, final_author)
                             final_cover = c if c else NO_COVER_MARKER
-                            
                             ws_books.append_row([titel, final_author, g, rating, final_cover])
                             del st.session_state.df_books
-                        
                         st.success(f"Gespeichert: {titel}")
-                        if final_author != autor_frag:
-                            st.info(f"Autor vervollständigt: {final_author}")
-                            
+                        if final_author != autor_frag: st.info(f"Autor vervollständigt: {final_author}")
                         st.balloons() 
                         time.sleep(2) 
-                        
                         st.session_state.input_key += 1
                         st.rerun()
                     else: st.error("Text fehlt.")
@@ -342,40 +378,79 @@ def main():
         # --- TAB 2: AUTOREN ---
         elif selected_nav == "👥 Autoren":
             st.header("Autoren")
+            
+            # --- 1. MANUELL HINZUFÜGEN ---
+            with st.expander("➕ Autor manuell hinzufügen", expanded=False):
+                with st.form("add_auth_form"):
+                    new_auth_name = st.text_input("Name des Autors (Vollständig):")
+                    add_btn = st.form_submit_button("Hinzufügen")
+                    if add_btn and new_auth_name:
+                        if new_auth_name not in known_authors_list:
+                            ws_authors.append_row([new_auth_name])
+                            del st.session_state.df_authors
+                            st.success(f"Autor '{new_auth_name}' hinzugefügt!")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            st.warning("Dieser Autor existiert schon.")
+
+            # --- 2. ZUSAMMENFASSUNG ---
             df_b = st.session_state.df_books
             df_a = st.session_state.df_authors.copy()
             counts = {}
             if not df_b.empty: counts = df_b["Autor"].value_counts().to_dict()
             if df_a.empty: df_a = pd.DataFrame({"Name": [""]})
-            df_a["Anzahl Bücher"] = df_a["Name"].map(counts).fillna(0).astype(int)
+            
+            # Umbenennen für Anzeige
+            df_a["Anzahl d. Bücher"] = df_a["Name"].map(counts).fillna(0).astype(int)
 
-            # GESAMTSUMME
             total_books = len(df_b)
             st.metric("Bücher insgesamt:", total_books)
 
-            # SORTIERUNG NACH NACHNAME
             df_a["_Nachname"] = df_a["Name"].apply(get_lastname)
             df_a = df_a.sort_values(by="_Nachname")
 
+            # --- 3. EDITOR (OHNE INDEX) ---
+            # Index resetten, damit keine komischen Zahlen (11, 14..) angezeigt werden
+            df_display = df_a[["Name", "Anzahl d. Bücher"]].reset_index(drop=True)
+
             edited_authors = st.data_editor(
-                df_a[["Name", "Anzahl Bücher"]],
+                df_display,
                 num_rows="dynamic",
                 use_container_width=True,
                 column_config={
                     "Name": st.column_config.TextColumn("Name", required=True),
-                    "Anzahl Bücher": st.column_config.NumberColumn("Anzahl", disabled=True)
+                    "Anzahl d. Bücher": st.column_config.NumberColumn("Anzahl d. Bücher", disabled=True)
                 },
                 hide_index=True
             )
-            if st.button("👥 Liste aktualisieren"):
-                clean = edited_authors[edited_authors["Name"].astype(str).str.strip() != ""]
-                df_save = clean[["Name"]]
-                ws_authors.clear()
-                ws_authors.update_cell(1, 1, "Name")
-                if not df_save.empty: ws_authors.update([df_save.columns.values.tolist()] + df_save.values.tolist())
-                del st.session_state.df_authors
-                st.success("Gespeichert!")
-                st.rerun()
+            
+            # SPEICHERN BUTTON
+            col_save, col_clean = st.columns(2)
+            with col_save:
+                if st.button("💾 Liste speichern"):
+                    clean = edited_authors[edited_authors["Name"].astype(str).str.strip() != ""]
+                    df_save = clean[["Name"]]
+                    ws_authors.clear()
+                    ws_authors.update_cell(1, 1, "Name")
+                    if not df_save.empty: ws_authors.update([df_save.columns.values.tolist()] + df_save.values.tolist())
+                    del st.session_state.df_authors
+                    st.success("Gespeichert!")
+                    st.rerun()
+            
+            # --- 4. CLEANUP BUTTON (BERKEL FIX) ---
+            with col_clean:
+                if st.button("🧹 Autoren aufräumen"):
+                    with st.spinner("Prüfe auf Dubletten (z.B. Berkel -> Christian Berkel)..."):
+                        merged_count = cleanup_author_duplicates(ws_books, ws_authors, df_a)
+                        if merged_count > 0:
+                            del st.session_state.df_books
+                            del st.session_state.df_authors
+                            st.success(f"{merged_count} Autoren zusammengeführt! Bitte Seite neu laden.")
+                            time.sleep(2)
+                            st.rerun()
+                        else:
+                            st.info("Alles sauber! Keine Dubletten gefunden.")
 
         # --- TAB 3: LISTE ---
         elif selected_nav == "🔍 Liste":
@@ -395,7 +470,6 @@ def main():
                 df_view = df_books.sort_values(by="_Nachname")
                 
                 if search:
-                    # LEERZEICHEN-KILLER
                     clean_search = search.strip()
                     df_view = df_view[
                         df_view["Titel"].astype(str).str.contains(clean_search, case=False) |
