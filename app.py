@@ -31,7 +31,7 @@ st.markdown("""
         margin-top: 10px;
     }
 
-    /* NAVIGATION (Radio Buttons als Kacheln verkleidet) */
+    /* NAVIGATION */
     div[role="radiogroup"] {
         display: flex;
         flex-direction: row;
@@ -133,6 +133,7 @@ def sync_authors(ws_books, ws_authors):
     df_a = st.session_state.df_authors
     if df_b.empty: return 0
     
+    # Hier trimmen wir schon mal beim Einlesen
     book_authors = set([a.strip() for a in df_b["Autor"].tolist() if a.strip()])
     existing_authors = set([a.strip() for a in df_a["Name"].tolist() if a.strip()]) if not df_a.empty and "Name" in df_a else set()
     
@@ -245,27 +246,51 @@ def silent_background_check(ws_books, df_books):
         return updates
     return 0
 
-# --- SPEZIALFUNKTION: DUBLETTEN KILLER ---
+# --- DUBLETTEN KILLER 2.0 (Aggressiv) ---
 def cleanup_author_duplicates(ws_books, ws_authors, df_authors):
     """
-    Sucht nach 'Berkel' und 'Christian Berkel' und führt sie zusammen.
-    Das Längere gewinnt.
+    Räumt auf:
+    1. Identische Namen (die sich nur durch Leerzeichen unterscheiden)
+    2. Kurzformen (Berkel -> Christian Berkel)
     """
-    all_authors = [a for a in df_authors["Name"].tolist() if str(a).strip()]
-    # Sortiere nach Länge (längste zuerst), damit 'Christian Berkel' vor 'Berkel' kommt
-    all_authors.sort(key=len, reverse=True)
+    all_raw_authors = [str(a) for a in df_authors["Name"].tolist() if str(a).strip()]
     
-    replacements = {} # Speichert "Berkel" -> "Christian Berkel"
+    # Schritt 1: Unsichtbare Leerzeichen killen und gruppieren
+    # Map: Saubere Version -> [Liste der originalen schmutzigen Versionen]
+    clean_map = {} 
+    for raw in all_raw_authors:
+        clean = raw.strip() # " Name " -> "Name"
+        if clean not in clean_map:
+            clean_map[clean] = []
+        clean_map[clean].append(raw)
     
-    # Finde Dubletten (Kurzform in Langform)
-    for i, long_name in enumerate(all_authors):
-        for short_name in all_authors[i+1:]:
-            # Wenn der kurze Name im langen steckt UND sie nicht gleich sind
+    replacements = {} 
+
+    # Fall A: "Name" und "Name " existieren -> Alle zu "Name"
+    for clean_name, raw_versions in clean_map.items():
+        if len(set(raw_versions)) > 1: # Es gibt verschiedene Schreibweisen für denselben Namen
+            # Nimm die sauberste (ohne Leerzeichen) als Ziel
+            target = clean_name
+            for bad_version in raw_versions:
+                if bad_version != target:
+                    replacements[bad_version] = target
+
+    # Fall B: "Berkel" -> "Christian Berkel"
+    # Wir nehmen jetzt die Liste der sauberen Namen
+    unique_clean_authors = list(clean_map.keys())
+    unique_clean_authors.sort(key=len, reverse=True) # Längste zuerst
+
+    for i, long_name in enumerate(unique_clean_authors):
+        for short_name in unique_clean_authors[i+1:]:
+            # Wenn kurz in lang steckt
             if short_name.lower() in long_name.lower() and short_name.lower() != long_name.lower():
-                # Sicherheitscheck: Nicht "Mann" in "Hermann" mergen, sondern nur echte Nachnamen
-                # Wir nehmen an: Wenn der kurze Name exakt dem Nachnamen des langen entspricht.
-                # Oder einfacher: Wir vertrauen darauf, dass Mama keine Autoren hat, die "Christian" heißen und "Christian Berkel".
-                replacements[short_name] = long_name
+                # Wir ersetzen den kurzen sauberen Namen durch den langen
+                # Aber wir müssen auch aufpassen, dass wir alle 'schmutzigen' Varianten des kurzen Namens erwischen
+                
+                # Alle Varianten des kurzen Namens (z.B. "Berkel ", "Berkel") -> "Christian Berkel"
+                if short_name in clean_map:
+                    for bad_version in clean_map[short_name]:
+                        replacements[bad_version] = long_name
 
     if not replacements:
         return 0
@@ -280,28 +305,53 @@ def cleanup_author_duplicates(ws_books, ws_authors, df_authors):
     updates_count = 0
     if idx_a != -1:
         for i, row in enumerate(books_vals[1:], start=2):
-            current_auth = row[idx_a]
-            if current_auth in replacements:
-                new_auth = replacements[current_auth]
-                ws_books.update_cell(i, idx_a + 1, new_auth)
-                updates_count += 1
-                time.sleep(0.5) # Bissel bremsen
+            if len(row) > idx_a:
+                current_auth = row[idx_a]
+                if current_auth in replacements:
+                    new_auth = replacements[current_auth]
+                    ws_books.update_cell(i, idx_a + 1, new_auth)
+                    updates_count += 1
+                    time.sleep(0.5)
 
-    # 2. Update AUTOREN Sheet (Löschen der kurzen Namen)
-    # Wir löschen einfach die ganze Autorenliste und schreiben die 'Guten' neu rein
-    # Das ist sicherer als Zeilen löschen
+    # 2. Update AUTOREN Sheet
+    # Wir bauen die Liste komplett neu auf, ohne die ersetzten Namen
+    final_author_list = []
     
-    # Neue saubere Liste erstellen
-    clean_author_list = []
-    for auth in all_authors:
-        # Wenn der Autor NICHT ersetzt wurde, darf er bleiben
-        if auth not in replacements:
-            clean_author_list.append([auth])
-            
+    # Nimm alle sauberen Namen, die NICHT in den Ersetzungen als SCHLÜSSEL (also 'Wegwerf-Name') auftauchen
+    # Wir iterieren durch die Clean-Map keys
+    for clean_name in clean_map.keys():
+        # Prüfen, ob dieser 'clean_name' selbst ersetzt wurde (z.B. Berkel -> Christian Berkel)
+        # Dazu schauen wir, ob irgendeine seiner Varianten ersetzt wurde.
+        # Aber da wir oben Fall B gemacht haben, zeigt "Berkel" (clean) auf alle seine Varianten.
+        
+        # Einfacher: Wenn dieser Name (oder seine Varianten) in replacements als Key vorkommt, fliegt er raus.
+        # ACHTUNG: Wir müssen aufpassen, dass wir das Ziel nicht löschen.
+        
+        # Check: Ist dieser Name ein Ziel von irgendwem? Ja -> Behalten.
+        # Ist er ein Opfer? -> Weg.
+        
+        # Da wir mit 'replacements' arbeiten, ist alles, was Key ist, ein Opfer.
+        # Aber wir müssen sicherstellen, dass wir nicht versehentlich das Ziel löschen, falls wir Zirkelschlüsse hätten (haben wir hier nicht).
+        
+        # Wir prüfen einfach: Ist dieser 'clean_name' ein Key in replacements? 
+        # Da replacements 'raw' strings nutzt, müssen wir schauen ob ANY raw version ein key ist.
+        # Wenn ALLE raw versions keys sind, fliegt der Autor raus.
+        
+        raw_versions = clean_map[clean_name]
+        is_victim = True
+        for raw in raw_versions:
+            if raw not in replacements:
+                is_victim = False # Eine Version bleibt erhalten (das ist das Ziel)
+                break
+        
+        if not is_victim:
+            final_author_list.append([clean_name])
+
     ws_authors.clear()
     ws_authors.update_cell(1, 1, "Name")
-    if clean_author_list:
-        ws_authors.update(values=[["Name"]] + clean_author_list) # Mit Header neu schreiben
+    if final_author_list:
+        final_author_list.sort() # Alphabetisch sortieren
+        ws_authors.update(values=[["Name"]] + final_author_list)
 
     return len(replacements)
 
@@ -379,29 +429,34 @@ def main():
         elif selected_nav == "👥 Autoren":
             st.header("Autoren")
             
-            # --- 1. MANUELL HINZUFÜGEN ---
-            with st.expander("➕ Autor manuell hinzufügen", expanded=False):
-                with st.form("add_auth_form"):
-                    new_auth_name = st.text_input("Name des Autors (Vollständig):")
+            # --- 1. MANUELL HINZUFÜGEN (JETZT OFFEN) ---
+            st.write(" **Neuen Autor anlegen**")
+            with st.form("add_auth_form"):
+                col_inp, col_btn = st.columns([3, 1])
+                with col_inp:
+                    new_auth_name = st.text_input("Name (Vollständig):", label_visibility="collapsed", placeholder="z.B. Agatha Christie")
+                with col_btn:
                     add_btn = st.form_submit_button("Hinzufügen")
-                    if add_btn and new_auth_name:
-                        if new_auth_name not in known_authors_list:
-                            ws_authors.append_row([new_auth_name])
-                            del st.session_state.df_authors
-                            st.success(f"Autor '{new_auth_name}' hinzugefügt!")
-                            time.sleep(1)
-                            st.rerun()
-                        else:
-                            st.warning("Dieser Autor existiert schon.")
+                
+                if add_btn and new_auth_name:
+                    if new_auth_name not in known_authors_list:
+                        ws_authors.append_row([new_auth_name])
+                        del st.session_state.df_authors
+                        st.success(f"'{new_auth_name}' dabei!")
+                        time.sleep(0.5)
+                        st.rerun()
+                    else:
+                        st.warning("Gibt's schon.")
 
-            # --- 2. ZUSAMMENFASSUNG ---
+            st.markdown("---")
+
+            # --- 2. EDITOR ---
             df_b = st.session_state.df_books
             df_a = st.session_state.df_authors.copy()
             counts = {}
             if not df_b.empty: counts = df_b["Autor"].value_counts().to_dict()
             if df_a.empty: df_a = pd.DataFrame({"Name": [""]})
             
-            # Umbenennen für Anzeige
             df_a["Anzahl d. Bücher"] = df_a["Name"].map(counts).fillna(0).astype(int)
 
             total_books = len(df_b)
@@ -410,8 +465,6 @@ def main():
             df_a["_Nachname"] = df_a["Name"].apply(get_lastname)
             df_a = df_a.sort_values(by="_Nachname")
 
-            # --- 3. EDITOR (OHNE INDEX) ---
-            # Index resetten, damit keine komischen Zahlen (11, 14..) angezeigt werden
             df_display = df_a[["Name", "Anzahl d. Bücher"]].reset_index(drop=True)
 
             edited_authors = st.data_editor(
@@ -425,9 +478,8 @@ def main():
                 hide_index=True
             )
             
-            # SPEICHERN BUTTON
-            col_save, col_clean = st.columns(2)
-            with col_save:
+            c1, c2 = st.columns(2)
+            with c1:
                 if st.button("💾 Liste speichern"):
                     clean = edited_authors[edited_authors["Name"].astype(str).str.strip() != ""]
                     df_save = clean[["Name"]]
@@ -438,19 +490,18 @@ def main():
                     st.success("Gespeichert!")
                     st.rerun()
             
-            # --- 4. CLEANUP BUTTON (BERKEL FIX) ---
-            with col_clean:
+            with c2:
                 if st.button("🧹 Autoren aufräumen"):
-                    with st.spinner("Prüfe auf Dubletten (z.B. Berkel -> Christian Berkel)..."):
+                    with st.spinner("Jage Doppelgänger & Leerzeichen..."):
                         merged_count = cleanup_author_duplicates(ws_books, ws_authors, df_a)
                         if merged_count > 0:
                             del st.session_state.df_books
                             del st.session_state.df_authors
-                            st.success(f"{merged_count} Autoren zusammengeführt! Bitte Seite neu laden.")
+                            st.success(f"{merged_count} Autoren bereinigt/zusammengeführt!")
                             time.sleep(2)
                             st.rerun()
                         else:
-                            st.info("Alles sauber! Keine Dubletten gefunden.")
+                            st.info("Alles blitzblank! ✨")
 
         # --- TAB 3: LISTE ---
         elif selected_nav == "🔍 Liste":
